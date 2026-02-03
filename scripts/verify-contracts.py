@@ -450,7 +450,7 @@ def main():
     parser.add_argument('--all', action='store_true', help='Verify all contracts')
     parser.add_argument('--address', type=str, help='Verify specific contract address')
     parser.add_argument('--file', type=str, help='Verify contracts from JSON file')
-    parser.add_argument('--changed-file', type=str, help='Verify contracts from changed addresses JSON (from detect-changed-addresses.py)')
+    parser.add_argument('--changed-file', type=str, help='Verify contracts from changed addresses JSON (format: [{"name": "contractName", "address": "0x..."}])')
     parser.add_argument('--name', type=str, help='Contract name (used with --address)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     parser.add_argument('--output', '-o', type=str, help='Output JSON report file')

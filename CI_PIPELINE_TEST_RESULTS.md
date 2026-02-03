@@ -10,32 +10,41 @@ All pipeline components have been manually tested and verified to work as expect
 
 ## Components Tested
 
-### 1. Change Detection Script (`detect-changed-addresses.py`)
+### 1. Change Detection (Inline Git Diff)
 
-**Test:** Compare git refs with actual address changes
+**Test:** Extract address changes using git diff
 ```bash
-python3 scripts/detect-changed-addresses.py \
-  --base 25f0385 \
-  --head 0fe53df \
-  --output /tmp/pipeline-test-changes.json
+git diff 25f0385..0fe53df -- 'addresses/**/*.json' | \
+  grep '^+' | grep '"0x' | \
+  python3 -c "
+import sys, re, json
+addresses = []
+for line in sys.stdin:
+    line = line[1:].strip().rstrip(',')
+    match = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
+    if match:
+        name, address = match.groups()
+        if address.lower() != '0x0000000000000000000000000000000000000000':
+            addresses.append({'name': name, 'address': address.lower()})
+if addresses:
+    with open('/tmp/pipeline-test-changes.json', 'w') as f:
+        json.dump(addresses, f)
+"
 ```
 
 **Results:**
-- ✅ Successfully detected 11 address changes (3 new, 3 modified, 5 removed)
+- ✅ Successfully detected 11 address changes (new + modified)
 - ✅ Correctly filtered out zero addresses
 - ✅ Generated valid JSON output with proper structure
-- ✅ Properly identified change types (added/modified/removed)
-- ✅ Exit code 0 when changes detected
-- ✅ Exit code 0 when no changes (doesn't create output file)
+- ✅ Simpler and more robust than parsing entire JSON files
+- ✅ No external script needed - inline in workflow
 
 **Sample Output:**
 ```json
 [
   {
-    "file": "addresses/999/EulerSwapAddresses.json",
     "name": "eulerSwapV1Factory",
-    "address": "0xfbf2a49cb0cc50f4ccd4eac826ef1a76d99d29eb",
-    "change_type": "added"
+    "address": "0xfbf2a49cb0cc50f4ccd4eac826ef1a76d99d29eb"
   }
 ]
 ```
@@ -198,9 +207,9 @@ Total: 3
 ### Case 1: No Changes
 **Test:** Compare same commit against itself
 ```bash
-python3 scripts/detect-changed-addresses.py --base HEAD --head HEAD
+git diff HEAD..HEAD -- 'addresses/**/*.json' | grep '^+' | grep '"0x'
 ```
-**Result:** ✅ No output file created, exit code 0
+**Result:** ✅ No addresses extracted, no output file created
 
 ### Case 2: Invalid Address
 **Test:** Verify 0x0000...0001

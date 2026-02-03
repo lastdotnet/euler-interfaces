@@ -13,7 +13,7 @@ Automatically runs on pull requests to `main` when contract address files are mo
 - Changes to `EulerChains.json`
 
 **What it does:**
-1. Detects new or modified contract addresses in the PR
+1. Detects new or modified contract addresses in the PR using git diff
 2. Verifies each contract on Hyperscan.com
 3. Compiles contracts from source and compares bytecode
 4. Posts results as a PR comment
@@ -24,29 +24,6 @@ Automatically runs on pull requests to `main` when contract address files are mo
 - Verified contracts must match their source code exactly (excluding compiler metadata)
 
 ## Scripts
-
-### `detect-changed-addresses.py`
-
-Compares contract addresses between two git refs to find changes.
-
-```bash
-python3 scripts/detect-changed-addresses.py \
-  --base origin/main \
-  --head HEAD \
-  --output changed.json
-```
-
-**Output format:**
-```json
-[
-  {
-    "file": "addresses/999/CoreAddresses.json",
-    "name": "evc",
-    "address": "0x...",
-    "change_type": "added"
-  }
-]
-```
 
 ### `verify-contracts.py`
 
@@ -84,15 +61,25 @@ Test the workflow locally before pushing:
 # 1. Make changes to address files
 vim addresses/999/CoreAddresses.json
 
-# 2. Detect changes
-python3 scripts/detect-changed-addresses.py \
-  --base origin/main \
-  --head HEAD \
-  --output changed.json
-
-# 3. Verify changed contracts
+# 2. Extract changed addresses and verify
+git diff origin/main..HEAD -- 'addresses/**/*.json' | \
+  grep '^+' | grep '"0x' | \
+  python3 -c "
+import sys, re, json
+addresses = []
+for line in sys.stdin:
+    line = line[1:].strip().rstrip(',')
+    match = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
+    if match:
+        name, address = match.groups()
+        if address.lower() != '0x0000000000000000000000000000000000000000':
+            addresses.append({'name': name, 'address': address.lower()})
+if addresses:
+    with open('changed-addresses.json', 'w') as f:
+        json.dump(addresses, f, indent=2)
+" && \
 python3 scripts/verify-contracts.py \
-  --changed-file changed.json \
+  --changed-file changed-addresses.json \
   --verbose
 ```
 
