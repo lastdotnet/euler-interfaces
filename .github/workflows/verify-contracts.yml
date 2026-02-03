@@ -1,0 +1,152 @@
+name: Verify Contract Addresses
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'addresses/**/*.json'
+      - 'EulerChains.json'
+
+jobs:
+  verify-contracts:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history to compare with base
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install Python dependencies
+        run: |
+          pip install requests
+      
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      
+      - name: Detect changed addresses
+        id: changes
+        run: |
+          python3 scripts/detect-changed-addresses.py \
+            --base origin/${{ github.base_ref }} \
+            --head ${{ github.sha }} \
+            --output changed-addresses.json
+      
+      - name: Verify changed contracts
+        id: verify
+        run: |
+          if [ -f changed-addresses.json ]; then
+            python3 scripts/verify-contracts.py \
+              --changed-file changed-addresses.json \
+              --output verification-report.json \
+              --verbose
+          else
+            echo "No contract addresses changed"
+            exit 0
+          fi
+      
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report
+          path: verification-report.json
+          if-no-files-found: ignore
+      
+      - name: Comment on PR
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync('verification-report.json', 'utf8'));
+            } catch (e) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '❌ **Contract Verification Failed**\n\nUnable to read verification report. Please check the workflow logs for details.'
+              });
+              return;
+            }
+            
+            let comment = '❌ **Contract Verification Failed**\n\n';
+            comment += `**Summary:**\n`;
+            comment += `- ✅ Verified: ${report.summary.verified}\n`;
+            comment += `- ❌ Failed: ${report.summary.failed}\n`;
+            comment += `- 📊 Total: ${report.summary.total}\n\n`;
+            
+            if (report.failed && report.failed.length > 0) {
+              comment += '**Failed Contracts:**\n\n';
+              for (const contract of report.failed) {
+                comment += `- **${contract.name}** (\`${contract.address}\`)\n`;
+                comment += `  - Error: ${contract.error}\n\n`;
+              }
+            }
+            
+            comment += '\n---\n';
+            comment += '⚠️ **All contracts must be verified on Hyperscan before merging.**\n';
+            comment += 'Please verify the contracts manually at https://hyperscan.com and retry.';
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+      
+      - name: Comment success on PR
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            if (!fs.existsSync('verification-report.json')) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '✅ **No contract address changes detected**\n\nThis PR does not modify any contract addresses.'
+              });
+              return;
+            }
+            
+            const report = JSON.parse(fs.readFileSync('verification-report.json', 'utf8'));
+            
+            let comment = '✅ **All Contract Addresses Verified**\n\n';
+            comment += `**Summary:**\n`;
+            comment += `- ✅ Verified: ${report.summary.verified}\n`;
+            comment += `- ❌ Failed: ${report.summary.failed}\n`;
+            comment += `- 📊 Total: ${report.summary.total}\n\n`;
+            
+            if (report.verified && report.verified.length > 0) {
+              comment += '**Verified Contracts:**\n\n';
+              for (const contract of report.verified) {
+                comment += `- ✅ **${contract.name}** (\`${contract.address}\`)\n`;
+                comment += `  - Compiler: ${contract.details.compiler_version}\n`;
+                comment += `  - Optimizer Runs: ${contract.details.optimization_runs}\n`;
+                comment += `  - Size: ${contract.details.stripped_deployed_size} bytes\n\n`;
+              }
+            }
+            
+            comment += '\n---\n';
+            comment += '✨ All contracts are verified on Hyperscan and match their source code!';
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
