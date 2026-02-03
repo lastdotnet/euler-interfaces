@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -27,7 +26,6 @@ import requests
 
 # Configuration
 HYPERSCAN_API_BASE = "https://hyperscan.com/api/v2"
-CHAIN_ID = 999
 REPO_ROOT = Path(__file__).parent.parent
 
 # Known source repository mappings
@@ -213,7 +211,8 @@ class ContractVerifier:
                 subprocess.run(clone_cmd, check=True, capture_output=True)
                 
                 if 'commit' in source_info and 'tag' not in source_info:
-                    fetch_cmd = ["git", "fetch", "--unshallow"]
+                    # Fetch all branches to ensure commit is reachable
+                    fetch_cmd = ["git", "fetch", "--all"]
                     subprocess.run(fetch_cmd, cwd=repo_dir, check=False, capture_output=True)
                     checkout_cmd = ["git", "checkout", source_info['commit']]
                     subprocess.run(checkout_cmd, cwd=repo_dir, check=True, capture_output=True)
@@ -231,6 +230,8 @@ class ContractVerifier:
                 bytecode = self._extract_bytecode_from_artifacts(repo_dir)
                 if bytecode:
                     self.log(f"Compiled {len(bytecode)} chars of bytecode")
+                else:
+                    self.result['error'] = f"Could not find contract bytecode in build artifacts"
                 
                 return bytecode
                 
@@ -309,6 +310,7 @@ class ContractVerifier:
                     self.result['details']['first_diff_deployed'] = deployed_stripped[max(0, i-20):i+20]
                     self.result['details']['first_diff_compiled'] = compiled_stripped[max(0, i-20):i+20]
                     break
+            self.result['error'] = "Bytecode mismatch"
             return False
     
     def _strip_metadata(self, bytecode: str) -> str:
@@ -495,12 +497,10 @@ def main():
             else:
                 failed.append(verifier.result)
         
-        print(f"\nVerified: {len(verified)}/{len(addresses)}")
+        print_summary(verified, failed)
         
         if args.output:
-            report = {'verified': verified, 'failed': failed}
-            with open(args.output, 'w') as f:
-                json.dump(report, f, indent=2)
+            save_report(verified, failed, args.output)
         
         sys.exit(0 if len(failed) == 0 else 1)
     
