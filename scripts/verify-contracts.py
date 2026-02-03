@@ -211,9 +211,8 @@ class ContractVerifier:
                 subprocess.run(clone_cmd, check=True, capture_output=True)
                 
                 if 'commit' in source_info and 'tag' not in source_info:
-                    # Fetch all branches to ensure commit is reachable
-                    fetch_cmd = ["git", "fetch", "--all"]
-                    subprocess.run(fetch_cmd, cwd=repo_dir, check=False, capture_output=True)
+                    fetch_cmd = ["git", "fetch", "origin", source_info['commit']]
+                    subprocess.run(fetch_cmd, cwd=repo_dir, check=True, capture_output=True)
                     checkout_cmd = ["git", "checkout", source_info['commit']]
                     subprocess.run(checkout_cmd, cwd=repo_dir, check=True, capture_output=True)
                 
