@@ -84,17 +84,17 @@ SOURCE_REPOS = {
         "contract_path": "src/EulerEarnFactory.sol"
     },
     
-    # Euler Swap
-    "EulerSwapV2Factory": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "EulerSwapV2": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "EulerSwapV2Periphery": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "EulerSwapV2ProtocolFeeConfig": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "EulerSwapV2Registry": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "eulerSwapV2Factory": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "eulerSwapV2Implementation": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "eulerSwapV2Periphery": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "eulerSwapV2ProtocolFeeConfig": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
-    "eulerSwapV2Registry": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751"},
+    # Euler Swap - artifact names differ from JSON keys
+    "EulerSwapFactory": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
+    "EulerSwap": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
+    "EulerSwapPeriphery": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
+    "EulerSwapProtocolFeeConfig": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
+    "EulerSwapRegistry": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
+    "eulerSwapV2Factory": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapFactory"},
+    "eulerSwapV2Implementation": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwap"},
+    "eulerSwapV2Periphery": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapPeriphery"},
+    "eulerSwapV2ProtocolFeeConfig": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapProtocolFeeConfig"},
+    "eulerSwapV2Registry": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapRegistry"},
     
     # EVK Periphery - uses all-shallow to init all submodules + nested (non-recursive)
     "AccountLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
@@ -186,17 +186,17 @@ SOURCE_REPOS = {
     
     # Governor contracts
     "GovernorAccessControlEmergency": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "accessControlEmergencyGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
+    "accessControlEmergencyGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow", "artifact_name": "GovernorAccessControlEmergency"},
     "FactoryGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eVaultFactoryGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
+    "eVaultFactoryGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow", "artifact_name": "FactoryGovernor"},
     "TimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0"},
-    "accessControlEmergencyGovernorAdminTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0"},
-    "accessControlEmergencyGovernorWildcardTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0"},
-    "eVaultFactoryTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0"},
+    "accessControlEmergencyGovernorAdminTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0", "artifact_name": "TimelockController"},
+    "accessControlEmergencyGovernorWildcardTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0", "artifact_name": "TimelockController"},
+    "eVaultFactoryTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0", "artifact_name": "TimelockController"},
     
     # OFT Bridge
     "OFTAdapterUpgradeable": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulOFTAdapter": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
+    "eulOFTAdapter": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow", "artifact_name": "OFTAdapterUpgradeable"},
 }
 
 
@@ -405,7 +405,8 @@ class ContractVerifier:
                     return None
                 
                 use_runtime = self.result['details'].get('bytecode_type') == 'runtime'
-                bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime)
+                artifact_name = source_info.get('artifact_name')
+                bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime, artifact_name=artifact_name)
                 if bytecode:
                     self.log(f"Compiled {len(bytecode)} chars of {'runtime' if use_runtime else 'creation'} bytecode")
                 else:
@@ -535,25 +536,25 @@ class ContractVerifier:
                 content = content.replace('[profile.default]', f'[profile.default]\nvia_ir = {via_ir_value}')
         
         # Exclude script and test folders to avoid missing dependency errors from uninitialized submodules
-        if re.search(r'script\s*=\s*"[^"]+"', content):
-            content = re.sub(r'script\s*=\s*"[^"]+"', 'script = "disabled_script"', content)
+        if re.search(r'script\s*=\s*["\'][^"\']+["\']', content):
+            content = re.sub(r'script\s*=\s*["\'][^"\']+["\']', 'script = "disabled_script"', content)
         else:
             content = content.replace('[profile.default]', '[profile.default]\nscript = "disabled_script"')
         
-        if re.search(r'test\s*=\s*"[^"]+"', content):
-            content = re.sub(r'test\s*=\s*"[^"]+"', 'test = "disabled_test"', content)
+        if re.search(r'test\s*=\s*["\'][^"\']+["\']', content):
+            content = re.sub(r'test\s*=\s*["\'][^"\']+["\']', 'test = "disabled_test"', content)
         else:
             content = content.replace('[profile.default]', '[profile.default]\ntest = "disabled_test"')
         
         foundry_toml.write_text(content)
     
-    def _extract_bytecode_from_artifacts(self, repo_dir: Path, use_runtime: bool = False) -> Optional[str]:
+    def _extract_bytecode_from_artifacts(self, repo_dir: Path, use_runtime: bool = False, artifact_name: Optional[str] = None) -> Optional[str]:
         """Extract bytecode from Foundry build artifacts"""
         out_dir = repo_dir / "out"
         if not out_dir.exists():
             return None
         
-        name_lower = self.name.lower()
+        search_name = (artifact_name or self.name).lower()
         bytecode_key = 'deployedBytecode' if use_runtime else 'bytecode'
         
         for artifact_file in out_dir.rglob("*.json"):
@@ -561,7 +562,7 @@ class ContractVerifier:
                 with open(artifact_file) as f:
                     data = json.load(f)
                     contract_name = data.get('contractName', '')
-                    if contract_name.lower() == name_lower or artifact_file.stem.lower() == name_lower:
+                    if contract_name.lower() == search_name or artifact_file.stem.lower() == search_name:
                         bytecode = data.get(bytecode_key, {}).get('object')
                         if bytecode and bytecode != '0x':
                             return bytecode
