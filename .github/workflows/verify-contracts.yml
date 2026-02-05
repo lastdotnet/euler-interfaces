@@ -36,18 +36,30 @@ jobs:
         id: verify
         run: |
           # Extract new/modified addresses from git diff
+          # Use set +o pipefail to handle grep returning exit code 1 when no matches found
+          set +o pipefail
+          
           git diff origin/${{ github.base_ref }}..${{ github.sha }} -- 'addresses/**/*.json' | \
-            grep '^+' | grep '"0x' | \
-            python3 -c "
+            grep '^+' | grep '"0x' > /tmp/address_changes.txt || true
+          
+          set -o pipefail
+          
+          # Process the extracted lines with Python
+          python3 -c "
           import sys, re, json
+          
           addresses = []
-          for line in sys.stdin:
-              line = line[1:].strip().rstrip(',')
-              match = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
-              if match:
-                  name, address = match.groups()
-                  if address.lower() != '0x0000000000000000000000000000000000000000':
-                      addresses.append({'name': name, 'address': address.lower()})
+          try:
+              with open('/tmp/address_changes.txt', 'r') as f:
+                  for line in f:
+                      line = line[1:].strip().rstrip(',')
+                      match = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
+                      if match:
+                          name, address = match.groups()
+                          if address.lower() != '0x0000000000000000000000000000000000000000':
+                              addresses.append({'name': name, 'address': address.lower()})
+          except FileNotFoundError:
+              pass
           
           if addresses:
               with open('changed-addresses.json', 'w') as f:
@@ -55,7 +67,10 @@ jobs:
               print(f'Found {len(addresses)} changed address(es):', file=sys.stderr)
               for addr in addresses:
                   print(f'  {addr[\"name\"]}: {addr[\"address\"]}', file=sys.stderr)
-          " && \
+          else:
+              print('No contract addresses found in diff', file=sys.stderr)
+          "
+          
           if [ -f changed-addresses.json ]; then
             python3 scripts/verify-contracts.py \
               --changed-file changed-addresses.json \
