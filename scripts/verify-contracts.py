@@ -2,1121 +2,630 @@
 """
 HyperEVM Contract Verification Script
 
-Verifies that deployed contracts on hyperEVM match their source code by:
-1. Fetching deployed bytecode from Hyperscan block explorer
-2. Extracting compiler settings from verified contracts
-3. Compiling source code locally with same settings
-4. Comparing bytecodes (excluding compiler metadata)
+Verifies deployed contracts match their source code by:
+1. Loading contract-to-repo mapping from contract-mapping.json
+2. Grouping contracts by (repo, commit, compiler settings)
+3. Building each repo once with Foundry (using local submodules)
+4. Comparing deployed bytecode against compiled artifacts (stripping CBOR metadata,
+   accounting for constructor args, factory deployments, and immutable variables)
 
 Usage:
-    python3 scripts/verify-contracts.py --all                    # Verify all contracts
-    python3 scripts/verify-contracts.py --address 0x...          # Verify single contract
+    python3 scripts/verify-contracts.py --all
+    python3 scripts/verify-contracts.py --address 0x... --name evc
     python3 scripts/verify-contracts.py --file addresses/999/CoreAddresses.json
+    python3 scripts/verify-contracts.py --changed-file changed.json
 """
 
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
+
 import requests
 
+# ---------------------------------------------------------------------------
 # Configuration
-HYPERSCAN_API_BASE = "https://www.hyperscan.com/api/v2"
+# ---------------------------------------------------------------------------
+HYPERSCAN_API = "https://www.hyperscan.com/api/v2"
 HYPERLIQUID_RPC = "https://rpc.hyperliquid.xyz/evm"
 REPO_ROOT = Path(__file__).parent.parent
-CONTRACT_MAPPING_FILE = REPO_ROOT / "contract-mapping.json"
+MAPPING_FILE = REPO_ROOT / "contract-mapping.json"
 LIB_DIR = REPO_ROOT / "lib"
 
-DEFAULT_COMPILER_SETTINGS = {
-    "compiler_version": "v0.8.24+commit.e11b9ed9",
-    "optimization_enabled": True,
-    "optimization_runs": 20000,
-    "evm_version": "cancun",
-}
-
-CONTRACT_MAPPING: Dict[str, dict] = {}
-
-
-def load_contract_mapping() -> Dict[str, dict]:
-    global CONTRACT_MAPPING
-    if CONTRACT_MAPPING:
-        return CONTRACT_MAPPING
-    
-    if not CONTRACT_MAPPING_FILE.exists():
-        print(f"Warning: {CONTRACT_MAPPING_FILE} not found. Run generate-contract-mapping.py first.")
-        return {}
-    
-    with open(CONTRACT_MAPPING_FILE) as f:
-        data = json.load(f)
-    
-    CONTRACT_MAPPING = {}
-    for name, info in data.items():
-        CONTRACT_MAPPING[name] = {**info, "contract_name": name}
-        if "address" in info:
-            CONTRACT_MAPPING[info["address"].lower()] = {**info, "contract_name": name}
-    
-    return CONTRACT_MAPPING
+ADDRESS_FILES = [
+    "addresses/999/CoreAddresses.json",
+    "addresses/999/LensAddresses.json",
+    "addresses/999/PeripheryAddresses.json",
+    "addresses/999/EulerSwapAddresses.json",
+    "addresses/999/GovernorAddresses.json",
+    "addresses/999/TokenAddresses.json",
+    "addresses/999/BridgeAddresses.json",
+]
 
 
-def get_local_repo_path(repo: str) -> Optional[Path]:
-    repo_name = repo.split("/")[-1]
-    local_path = LIB_DIR / repo_name
-    if local_path.exists() and (local_path / ".git").exists():
-        return local_path
-    return None
+# ---------------------------------------------------------------------------
+# Mapping
+# ---------------------------------------------------------------------------
+def load_mapping() -> dict:
+    if not MAPPING_FILE.exists():
+        print(f"Error: {MAPPING_FILE} not found. Run generate-contract-mapping.py first.")
+        sys.exit(1)
+    with open(MAPPING_FILE) as f:
+        return json.load(f)
 
 
-def get_source_info_for_contract(name: str, address: Optional[str] = None) -> Optional[dict]:
-    mapping = load_contract_mapping()
-    
-    if name in mapping:
-        return mapping[name]
-    
-    if address:
-        addr_lower = address.lower()
-        if addr_lower in mapping:
-            return mapping[addr_lower]
-    
-    return None
+# ---------------------------------------------------------------------------
+# Address loading
+# ---------------------------------------------------------------------------
+ZERO = "0x0000000000000000000000000000000000000000"
 
 
-class ContractVerifier:
-    """Handles verification of a single contract"""
-    
-    def __init__(self, address: str, name: Optional[str] = None, verbose: bool = False):
-        self.address = address.lower()
-        self.name = name
-        self.verbose = verbose
-        self.result = {
-            "address": self.address,
-            "name": name,
-            "verified": False,
-            "error": None,
-            "details": {}
-        }
-    
-    def log(self, message: str):
-        """Log message if verbose mode enabled"""
-        if self.verbose:
-            print(f"  {message}")
-    
-    def fetch_contract_info(self) -> bool:
-        """Fetch contract info from Hyperscan"""
-        self.log("Fetching contract info from Hyperscan...")
-        
-        try:
-            url = f"{HYPERSCAN_API_BASE}/addresses/{self.address}"
-            response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data.get('is_contract'):
-                self.result['error'] = "Address is not a contract"
-                return False
-            
-            self.result['details']['hyperscan_verified'] = data.get('is_verified', False)
-            
-            hyperscan_name = data.get('name')
-            if hyperscan_name:
-                if not self.name:
-                    self.name = hyperscan_name
-                    self.result['name'] = self.name
-                else:
-                    self.result['name'] = f"{self.name} ({hyperscan_name})"
-                    self.name = hyperscan_name
-            
-            self.result['details']['creation_tx'] = data.get('creation_transaction_hash')
-            self.result['details']['deployer'] = data.get('creator_address_hash')
-            
-            return True
-            
-        except Exception as e:
-            self.result['error'] = f"Failed to fetch contract info: {str(e)}"
-            return False
-    
-    def fetch_verification_data(self) -> bool:
-        """Fetch verification data from Hyperscan or use defaults"""
-        self.log("Fetching verification data...")
-        
-        try:
-            url = f"{HYPERSCAN_API_BASE}/smart-contracts/{self.address}"
-            response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            self.result['details']['compiler_version'] = data.get('compiler_version')
-            self.result['details']['optimization_enabled'] = data.get('optimization_enabled')
-            self.result['details']['optimization_runs'] = data.get('optimization_runs')
-            self.result['details']['evm_version'] = data.get('evm_version')
-            self.result['details']['file_path'] = data.get('file_path')
-            self.result['details']['source_code'] = data.get('source_code')
-            
-            compiler_settings = data.get('compiler_settings', {})
-            self.result['details']['via_ir'] = compiler_settings.get('viaIR', False)
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Hyperscan verification data unavailable, using defaults")
-            self.result['details']['compiler_version'] = DEFAULT_COMPILER_SETTINGS['compiler_version']
-            self.result['details']['optimization_enabled'] = DEFAULT_COMPILER_SETTINGS['optimization_enabled']
-            self.result['details']['optimization_runs'] = DEFAULT_COMPILER_SETTINGS['optimization_runs']
-            self.result['details']['evm_version'] = DEFAULT_COMPILER_SETTINGS['evm_version']
-            self.result['details']['using_default_settings'] = True
-            return True
-    
-    def fetch_deployed_bytecode(self) -> Optional[str]:
-        """Fetch deployed bytecode - tries creation tx, Hyperscan runtime, then RPC fallback"""
-        self.log("Fetching deployed bytecode...")
-        
-        try:
-            creation_tx = self.result['details'].get('creation_tx')
-            if creation_tx:
-                url = f"{HYPERSCAN_API_BASE}/transactions/{creation_tx}"
-                response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                bytecode = data.get('raw_input')
-                if bytecode:
-                    self.log(f"Fetched {len(bytecode)} chars of creation bytecode")
-                    self.result['details']['bytecode_type'] = 'creation'
-                    return bytecode
-            
-            self.log("No creation tx, fetching runtime bytecode from Hyperscan...")
-            url = f"{HYPERSCAN_API_BASE}/smart-contracts/{self.address}"
-            response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            bytecode = data.get('deployed_bytecode')
-            if bytecode:
-                self.log(f"Fetched {len(bytecode)} chars of runtime bytecode from Hyperscan")
-                self.result['details']['bytecode_type'] = 'runtime'
-                return bytecode
-        except Exception:
-            pass
-        
-        # Final fallback: fetch runtime bytecode directly from RPC
-        self.log("Falling back to RPC eth_getCode...")
-        bytecode = fetch_runtime_bytecode_from_rpc(self.address)
-        if bytecode:
-            self.log(f"Fetched {len(bytecode)} chars of runtime bytecode from RPC")
-            self.result['details']['bytecode_type'] = 'runtime'
-            self.result['details']['bytecode_source'] = 'rpc'
-            return bytecode
-        
-        self.result['error'] = "No bytecode found from any source"
-        return None
-    
-    def compile_from_source(self) -> Optional[str]:
-        self.log("Compiling from source...")
-        
-        source_info = get_source_info_for_contract(self.name, self.address)
-        
-        if not source_info:
-            self.result['error'] = f"No mapping in contract-mapping.json for {self.name}"
-            return None
-        
-        repo = source_info.get('repo')
-        commit = source_info.get('commit')
-        artifact_name = source_info.get('artifact_name')
-        
-        if not repo or not commit:
-            self.result['error'] = f"Incomplete mapping for {self.name}: missing repo or commit"
-            return None
-        
-        self.result['details']['source_repo'] = repo
-        self.result['details']['source_commit'] = commit
-        self.result['details']['artifact_name'] = artifact_name
-        
-        local_repo = get_local_repo_path(repo)
-        
-        try:
-            if local_repo:
-                bytecode = self._compile_from_local_repo(local_repo, commit, artifact_name)
-                if bytecode:
-                    return bytecode
-                self.log("Local build failed, trying fresh clone...")
-            
-            return self._compile_from_cloned_repo(repo, commit, artifact_name)
-                
-        except Exception as e:
-            self.result['error'] = f"Failed to compile from source: {str(e)}"
-            return None
-    
-    def _compile_from_local_repo(self, repo_dir: Path, expected_commit: str, artifact_name: Optional[str]) -> Optional[str]:
-        self.log(f"Using local repo: {repo_dir}")
-        
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True
-        )
-        current_commit = result.stdout.strip()
-        
-        if current_commit != expected_commit:
-            self.log(f"Warning: local commit {current_commit[:8]} differs from mapping {expected_commit[:8]}")
-            self.result['details']['commit_mismatch'] = True
-            self.result['details']['local_commit'] = current_commit
-        
-        # Back up foundry.toml before patching to avoid dirtying the working tree
-        foundry_toml = repo_dir / "foundry.toml"
-        original_config = foundry_toml.read_text() if foundry_toml.exists() else None
-        
-        try:
-            self._patch_foundry_config(repo_dir)
-            
-            self.log("Building with Foundry...")
-            build_cmd = ["forge", "build", "--force"]
-            result = subprocess.run(build_cmd, cwd=repo_dir, capture_output=True, text=True, timeout=600)
-            
-            if result.returncode != 0:
-                self.log(f"Local build failed: {result.stderr[:200]}...")
-                return None
-            
-            use_runtime = self.result['details'].get('bytecode_type') == 'runtime'
-            bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime, artifact_name=artifact_name)
-            if bytecode:
-                self.log(f"Compiled {len(bytecode)} chars of {'runtime' if use_runtime else 'creation'} bytecode")
-            
-            return bytecode
-        finally:
-            # Restore original foundry.toml
-            if original_config is not None:
-                foundry_toml.write_text(original_config)
-    
-    def _compile_from_cloned_repo(self, repo: str, commit: str, artifact_name: Optional[str]) -> Optional[str]:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self.log(f"Cloning {repo}...")
-            
-            repo_dir = Path(tmpdir) / "repo"
-            repo_url = f"https://github.com/{repo}.git"
-            
-            repo_dir.mkdir(exist_ok=True)
-            subprocess.run(["git", "init", "-q"], cwd=repo_dir, capture_output=True)
-            subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=repo_dir, capture_output=True)
-            
-            fetch_cmd = ["git", "fetch", "--depth", "1", "origin", commit]
-            result = subprocess.run(fetch_cmd, cwd=repo_dir, capture_output=True, text=True)
-            if result.returncode != 0:
-                self.result['error'] = f"Failed to fetch commit {commit}: {result.stderr}"
-                return None
-            
-            checkout_cmd = ["git", "checkout", "FETCH_HEAD"]
-            result = subprocess.run(checkout_cmd, cwd=repo_dir, capture_output=True, text=True)
-            if result.returncode != 0:
-                self.result['error'] = f"Failed to checkout commit {commit}: {result.stderr}"
-                return None
-            
-            if (repo_dir / ".gitmodules").exists():
-                self.log("Initializing submodules...")
-                self._init_submodules_exact(repo_dir)
-                self._init_nested_submodules(repo_dir)
-            
-            self._patch_foundry_config(repo_dir)
-            
-            self.log("Building with Foundry...")
-            build_cmd = ["forge", "build", "--force"]
-            result = subprocess.run(build_cmd, cwd=repo_dir, capture_output=True, text=True, timeout=600)
-            
-            if result.returncode != 0:
-                self.result['error'] = f"Forge build failed: {result.stderr}"
-                return None
-            
-            use_runtime = self.result['details'].get('bytecode_type') == 'runtime'
-            bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime, artifact_name=artifact_name)
-            if bytecode:
-                self.log(f"Compiled {len(bytecode)} chars of {'runtime' if use_runtime else 'creation'} bytecode")
-            else:
-                self.result['error'] = f"Could not find contract bytecode in build artifacts"
-            
-            return bytecode
-    
-    def _init_submodules_exact(self, repo_dir: Path):
-        """Delegate to the free function."""
-        init_submodules_exact(repo_dir)
-    
-    def _init_nested_submodules(self, repo_dir: Path):
-        """Delegate to the free function."""
-        init_nested_submodules(repo_dir)
-    
-    def _patch_foundry_config(self, repo_dir: Path):
-        """Delegate to the free function, converting instance details to a settings dict."""
-        compiler_settings = {
-            "compiler_version": self.result['details'].get('compiler_version'),
-            "optimization_enabled": self.result['details'].get('optimization_enabled'),
-            "optimization_runs": self.result['details'].get('optimization_runs'),
-            "evm_version": self.result['details'].get('evm_version'),
-            "via_ir": self.result['details'].get('via_ir'),
-        }
-        patch_foundry_config_for_repo(repo_dir, compiler_settings)
-    
-    def _extract_bytecode_from_artifacts(self, repo_dir: Path, use_runtime: bool = False, artifact_name: Optional[str] = None) -> Optional[str]:
-        """Delegate to the free function."""
-        name = artifact_name or self.name
-        return extract_bytecode_from_artifacts(repo_dir, name, use_runtime=use_runtime)
-    
-    def compare_bytecodes(self, deployed: str, compiled: str) -> bool:
-        """Compare deployed and compiled bytecodes, delegating to the standalone function."""
-        self.log("Comparing bytecodes...")
-        
-        # Store raw sizes for verbose output
-        self.result['details']['stripped_deployed_size'] = self.result['details'].get('deployed_size', 0)
-        self.result['details']['stripped_compiled_size'] = self.result['details'].get('compiled_size', 0)
-        
-        match = compare_bytecodes(deployed, compiled, self.result)
-        
-        if match:
-            details = self.result['details']
-            if 'create2_prefix_size' in details and 'constructor_args_size' in details:
-                self.log(f"✅ Bytecodes match (CREATE2 + {details['constructor_args_size']} bytes constructor args)")
-            elif 'create2_prefix_size' in details:
-                self.log(f"✅ Bytecodes match (CREATE2 deployment with {details['create2_prefix_size']} byte prefix)")
-            elif 'constructor_args_size' in details:
-                self.log(f"✅ Bytecodes match (excluding {details['constructor_args_size']} bytes of constructor args)")
-            else:
-                self.log("✅ Bytecodes match!")
-        else:
-            self.log("❌ Bytecodes differ")
-        
-        return match
-    
-    def verify(self) -> bool:
-        """Run full verification process"""
-        print(f"\n{'='*80}")
-        print(f"Verifying: {self.name or self.address}")
-        print(f"{'='*80}")
-        
-        # Step 1: Fetch contract info
-        if not self.fetch_contract_info():
-            print(f"❌ Failed: {self.result['error']}")
-            return False
-        
-        # Step 2: Fetch verification data
-        if not self.fetch_verification_data():
-            print(f"❌ Failed: {self.result['error']}")
-            return False
-        
-        # Step 3: Fetch deployed bytecode
-        deployed_bytecode = self.fetch_deployed_bytecode()
-        if not deployed_bytecode:
-            print(f"❌ Failed: {self.result['error']}")
-            return False
-        
-        # Step 4: Compile from source
-        compiled_bytecode = self.compile_from_source()
-        if not compiled_bytecode:
-            print(f"❌ Failed: {self.result['error']}")
-            return False
-        
-        # Step 5: Compare bytecodes
-        match = self.compare_bytecodes(deployed_bytecode, compiled_bytecode)
-        self.result['verified'] = match
-        
-        if match:
-            print(f"✅ VERIFIED: {self.name}")
-            print(f"   Address: {self.address}")
-            print(f"   Compiler: {self.result['details']['compiler_version']}")
-            print(f"   Optimizer Runs: {self.result['details']['optimization_runs']}")
-            print(f"   Bytecode Size: {self.result['details']['stripped_deployed_size']} bytes")
-        else:
-            print(f"❌ VERIFICATION FAILED: {self.name}")
-            print(f"   Reason: Bytecode mismatch")
-        
-        return match
+def load_all_contracts() -> list[tuple[str, str]]:
+    """Load all non-zero addresses from the standard address files."""
+    contracts = []
+    for rel_path in ADDRESS_FILES:
+        path = REPO_ROOT / rel_path
+        if not path.exists():
+            continue
+        with open(path) as f:
+            data = json.load(f)
+        for name, addr in data.items():
+            if addr != ZERO:
+                contracts.append((name, addr))
+    return contracts
 
 
-def load_address_file(filepath: Path) -> Dict[str, str]:
-    """Load addresses from JSON file"""
+def load_address_file(filepath: Path) -> list[tuple[str, str]]:
     with open(filepath) as f:
         data = json.load(f)
-    
-    return {k: v for k, v in data.items() if v != "0x0000000000000000000000000000000000000000"}
+    return [(name, addr) for name, addr in data.items() if addr != ZERO]
 
 
-def verify_all_contracts(verbose: bool = False, skip_unmapped: bool = False, batch: bool = False) -> Tuple[List[dict], List[dict], List[str]]:
-    address_files = [
-        "addresses/999/CoreAddresses.json",
-        "addresses/999/LensAddresses.json",
-        "addresses/999/PeripheryAddresses.json",
-        "addresses/999/EulerSwapAddresses.json",
-        "addresses/999/TokenAddresses.json",
-        "addresses/999/BridgeAddresses.json",
-    ]
-    
-    all_contracts = []
-    for address_file in address_files:
-        filepath = REPO_ROOT / address_file
-        if not filepath.exists():
-            continue
-        addresses = load_address_file(filepath)
-        for name, address in addresses.items():
-            all_contracts.append((name, address))
-    
-    if batch:
-        return verify_contracts_batched(all_contracts, verbose=verbose, skip_unmapped=skip_unmapped)
-    return verify_contract_list(all_contracts, verbose=verbose, skip_unmapped=skip_unmapped)
+def load_changed_file(filepath: Path) -> list[tuple[str, str]]:
+    with open(filepath) as f:
+        data = json.load(f)
+    return [(c["name"], c["address"]) for c in data]
 
 
-def verify_contracts_batched(
-    contracts: List[Tuple[str, str]], 
-    verbose: bool = False,
-    skip_unmapped: bool = False
-) -> Tuple[List[dict], List[dict], List[str]]:
-    """Batch verification: compile once per repo, verify all contracts from that repo's artifacts."""
-    verified = []
-    failed = []
-    skipped = []
-    
-    # Pre-load the mapping cache
-    load_contract_mapping()
-    
-    # Group contracts by (repo, compiler settings) so each unique settings combination gets its own build
-    def _settings_key(info: dict) -> tuple:
-        return (
-            info.get('repo', ''),
-            info.get('commit', ''),
-            info.get('compiler_version'),
-            info.get('optimization_enabled'),
-            info.get('optimization_runs'),
-            info.get('evm_version'),
-            info.get('via_ir'),
-        )
-    
-    by_build: Dict[tuple, List[Tuple[str, str, dict]]] = {}
-    for name, address in contracts:
-        source_info = get_source_info_for_contract(name, address)
-        if not source_info:
-            if skip_unmapped:
-                skipped.append(name)
-            else:
-                failed.append({"name": name, "verified": False, "error": "No mapping in contract-mapping.json"})
-            continue
-        
-        key = _settings_key(source_info)
-        if key not in by_build:
-            by_build[key] = []
-        by_build[key].append((name, address, source_info))
-    
-    if skipped:
-        print(f"\n⚠️  Skipping {len(skipped)} unmapped contracts: {', '.join(skipped)}\n")
-    
-    total_builds = len(by_build)
-    for build_idx, (build_key, group_contracts) in enumerate(by_build.items(), 1):
-        repo = group_contracts[0][2].get('repo', '')
-        print(f"\n{'#'*80}")
-        print(f"# [{build_idx}/{total_builds}] Building repo: {repo} ({len(group_contracts)} contracts)")
-        print(f"{'#'*80}")
-        
-        # Use compiler settings from the group (all contracts in this group share the same settings)
-        first_info = group_contracts[0][2]
-        commit = first_info.get('commit')
-        repo_dir = None
-        build_success = False
-        is_temp = False
-        
-        compiler_settings = {
-            "compiler_version": first_info.get('compiler_version'),
-            "optimization_enabled": first_info.get('optimization_enabled'),
-            "optimization_runs": first_info.get('optimization_runs'),
-            "evm_version": first_info.get('evm_version'),
-            "via_ir": first_info.get('via_ir'),
-        }
-        
-        try:
-            repo_dir, build_success, is_temp = setup_and_build_repo(repo, commit, compiler_settings, verbose)
-        except Exception as e:
-            print(f"  ❌ Failed to build repo: {e}")
-        
-        if not build_success:
-            for name, address, source_info in group_contracts:
-                failed.append({"name": name, "address": address, "verified": False, "error": f"Repo build failed: {repo}"})
-            continue
-        
-        # Verify each contract from this build
-        for contract_idx, (name, address, source_info) in enumerate(group_contracts, 1):
-            print(f"\n  [{contract_idx}/{len(group_contracts)}] Verifying: {name}")
-            
-            result = verify_single_contract_from_build(
-                name, address, source_info, repo_dir, verbose
-            )
-            
-            if result.get('verified'):
-                verified.append(result)
-                print(f"    ✅ VERIFIED")
-            else:
-                failed.append(result)
-                print(f"    ❌ FAILED: {result.get('error', 'Unknown error')}")
-        
-        # Cleanup temp dir if it was created
-        if repo_dir and is_temp:
-            import shutil
-            shutil.rmtree(repo_dir, ignore_errors=True)
-    
-    return verified, failed, skipped
+# ---------------------------------------------------------------------------
+# Bytecode fetching (3-tier fallback)
+# ---------------------------------------------------------------------------
+def fetch_bytecode(address: str, verbose: bool = False) -> tuple[Optional[str], Optional[str]]:
+    """Fetch bytecode for address. Returns (bytecode_hex, 'creation'|'runtime')."""
+    addr = address.lower()
 
-
-def setup_and_build_repo(repo: str, commit: str, compiler_settings: dict, verbose: bool = False) -> Tuple[Optional[Path], bool, bool]:
-    """Returns (repo_dir, build_success, is_temp_dir)."""
-    local_repo = get_local_repo_path(repo)
-    if local_repo:
-        current_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_repo, capture_output=True, text=True
-        ).stdout.strip()
-        
-        if current_commit == commit:
-            print(f"  Using local repo: {local_repo} (commit matches)")
-            # Back up foundry.toml before patching to avoid dirtying the working tree
-            foundry_toml = local_repo / "foundry.toml"
-            original_config = foundry_toml.read_text() if foundry_toml.exists() else None
-            try:
-                patch_foundry_config_for_repo(local_repo, compiler_settings)
-                result = subprocess.run(
-                    ["forge", "build", "--force"], 
-                    cwd=local_repo, capture_output=True, text=True, timeout=600
-                )
-                if result.returncode == 0:
-                    return local_repo, True, False
-                print(f"  Local build failed, cloning fresh...")
-            finally:
-                # Restore original foundry.toml
-                if original_config is not None:
-                    foundry_toml.write_text(original_config)
-        else:
-            print(f"  Local repo at {current_commit[:8]}, need {commit[:8]}, cloning fresh...")
-    
-    print(f"  Cloning {repo} at {commit[:8]}...")
-    tmpdir = tempfile.mkdtemp()
-    repo_dir = Path(tmpdir) / "repo"
-    repo_dir.mkdir()
-    
-    repo_url = f"https://github.com/{repo}.git"
-    subprocess.run(["git", "init", "-q"], cwd=repo_dir, capture_output=True)
-    subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=repo_dir, capture_output=True)
-    
-    result = subprocess.run(
-        ["git", "fetch", "--depth", "1", "origin", commit],
-        cwd=repo_dir, capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        return None, False, False
-    
-    subprocess.run(["git", "checkout", "FETCH_HEAD"], cwd=repo_dir, capture_output=True)
-    
-    if (repo_dir / ".gitmodules").exists():
-        print(f"  Initializing submodules...")
-        init_submodules_exact(repo_dir)
-        init_nested_submodules(repo_dir)
-    
-    patch_foundry_config_for_repo(repo_dir, compiler_settings)
-    
-    print(f"  Building with Foundry...")
-    result = subprocess.run(
-        ["forge", "build", "--force"],
-        cwd=repo_dir, capture_output=True, text=True, timeout=600
-    )
-    
-    return repo_dir, result.returncode == 0, True
-
-
-def patch_foundry_config_for_repo(repo_dir: Path, compiler_settings: dict):
-    foundry_toml = repo_dir / "foundry.toml"
-    if not foundry_toml.exists():
-        return
-    
-    content = foundry_toml.read_text()
-    
-    if re.search(r'script\s*=\s*["\'][^"\']+["\']', content):
-        content = re.sub(r'script\s*=\s*["\'][^"\']+["\']', 'script = "disabled_script"', content)
-    else:
-        content = content.replace('[profile.default]', '[profile.default]\nscript = "disabled_script"')
-    
-    if re.search(r'test\s*=\s*["\'][^"\']+["\']', content):
-        content = re.sub(r'test\s*=\s*["\'][^"\']+["\']', 'test = "disabled_test"', content)
-    else:
-        content = content.replace('[profile.default]', '[profile.default]\ntest = "disabled_test"')
-    
-    if compiler_settings.get('optimization_enabled') is not None:
-        opt_val = "true" if compiler_settings['optimization_enabled'] else "false"
-        if re.search(r'optimizer\s*=\s*(true|false)', content):
-            content = re.sub(r'optimizer\s*=\s*(true|false)', f'optimizer = {opt_val}', content)
-        else:
-            content = content.replace('[profile.default]', f'[profile.default]\noptimizer = {opt_val}')
-    
-    if compiler_settings.get('optimization_runs') is not None:
-        runs = compiler_settings['optimization_runs']
-        if re.search(r'optimizer_runs\s*=\s*[\d_]+', content):
-            content = re.sub(r'optimizer_runs\s*=\s*[\d_]+', f'optimizer_runs = {runs}', content)
-        else:
-            content = content.replace('[profile.default]', f'[profile.default]\noptimizer_runs = {runs}')
-    
-    if compiler_settings.get('evm_version'):
-        evm = compiler_settings['evm_version']
-        if re.search(r'evm_version\s*=\s*"[^"]+"', content):
-            content = re.sub(r'evm_version\s*=\s*"[^"]+"', f'evm_version = "{evm}"', content)
-        else:
-            content = content.replace('[profile.default]', f'[profile.default]\nevm_version = "{evm}"')
-    
-    if compiler_settings.get('via_ir') is not None:
-        via_ir_val = "true" if compiler_settings['via_ir'] else "false"
-        if re.search(r'via_ir\s*=\s*(true|false)', content):
-            content = re.sub(r'via_ir\s*=\s*(true|false)', f'via_ir = {via_ir_val}', content)
-        else:
-            content = content.replace('[profile.default]', f'[profile.default]\nvia_ir = {via_ir_val}')
-    
-    if compiler_settings.get('compiler_version'):
-        match = re.search(r'v?(\d+\.\d+\.\d+)', compiler_settings['compiler_version'])
-        if match:
-            solc_ver = match.group(1)
-            if re.search(r'solc\s*=\s*"[\d\.]+"', content):
-                content = re.sub(r'solc\s*=\s*"[\d\.]+"', f'solc = "{solc_ver}"', content)
-            else:
-                content = content.replace('[profile.default]', f'[profile.default]\nsolc = "{solc_ver}"')
-    
-    foundry_toml.write_text(content)
-
-
-def init_submodules_exact(repo_dir: Path):
-    """Initialize submodules at their exact pinned commits."""
-    result = subprocess.run(
-        ["git", "submodule", "status"],
-        cwd=repo_dir, capture_output=True, text=True, timeout=30
-    )
-    if result.returncode != 0:
-        return
-    
-    for line in result.stdout.strip().split('\n'):
-        if not line.strip():
-            continue
-        parts = line.split()
-        if len(parts) >= 2:
-            commit = parts[0].lstrip('-+')
-            submodule_path = parts[1]
-            
-            subprocess.run(["git", "submodule", "init", submodule_path], cwd=repo_dir, capture_output=True, timeout=30)
-            
-            submodule_dir = repo_dir / submodule_path
-            if not submodule_dir.exists():
-                submodule_dir.mkdir(parents=True, exist_ok=True)
-            
-            url_result = subprocess.run(
-                ["git", "config", "--get", f"submodule.{submodule_path}.url"],
-                cwd=repo_dir, capture_output=True, text=True, timeout=10
-            )
-            if url_result.returncode != 0:
-                continue
-            url = url_result.stdout.strip()
-            
-            subprocess.run(["git", "init", "-q"], cwd=submodule_dir, capture_output=True, timeout=10)
-            subprocess.run(["git", "remote", "add", "origin", url], cwd=submodule_dir, capture_output=True, timeout=10)
-            subprocess.run(["git", "fetch", "--depth", "1", "origin", commit], cwd=submodule_dir, capture_output=True, timeout=120)
-            subprocess.run(["git", "checkout", "FETCH_HEAD"], cwd=submodule_dir, capture_output=True, timeout=30)
-
-
-def init_nested_submodules(repo_dir: Path):
-    """Initialize nested submodules in lib/* directories."""
-    lib_dir = repo_dir / "lib"
-    if not lib_dir.exists():
-        return
-    
-    for subdir in lib_dir.iterdir():
-        if subdir.is_dir() and (subdir / ".gitmodules").exists():
-            init_submodules_exact(subdir)
-
-
-def fetch_runtime_bytecode_from_rpc(address: str) -> Optional[str]:
-    """Fetch runtime bytecode directly from Hyperliquid EVM RPC via eth_getCode."""
+    # Tier 1: creation tx (only direct deploys, not factory calls)
     try:
-        response = requests.post(
-            HYPERLIQUID_RPC,
-            json={"jsonrpc": "2.0", "method": "eth_getCode", "params": [address, "latest"], "id": 1},
-            timeout=10
-        )
-        response.raise_for_status()
-        result = response.json().get('result', '0x')
-        if result and result != '0x':
-            return result
-        return None
-    except Exception:
-        return None
-
-
-def fetch_creation_bytecode_from_hyperscan(address: str) -> Tuple[Optional[str], Optional[str]]:
-    """Fetch creation bytecode by looking up the creation tx, falling back to runtime bytecode.
-    
-    Falls back through: creation tx -> Hyperscan runtime -> RPC eth_getCode.
-    Returns (bytecode, type) where type is 'creation' or 'runtime'.
-    """
-    try:
-        # First get the creation tx hash from Hyperscan
-        url = f"{HYPERSCAN_API_BASE}/addresses/{address}"
-        response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        creation_tx = data.get('creation_transaction_hash')
+        resp = requests.get(f"{HYPERSCAN_API}/addresses/{addr}",
+                            headers={"Accept": "application/json"}, timeout=10)
+        resp.raise_for_status()
+        creation_tx = resp.json().get("creation_transaction_hash")
         if creation_tx:
-            # Fetch the raw creation bytecode from the tx
-            tx_url = f"{HYPERSCAN_API_BASE}/transactions/{creation_tx}"
-            tx_response = requests.get(tx_url, headers={'Accept': 'application/json'}, timeout=10)
-            tx_response.raise_for_status()
-            tx_data = tx_response.json()
-            bytecode = tx_data.get('raw_input')
-            if bytecode:
-                return bytecode, 'creation'
-        
-        # Fall back to Hyperscan runtime bytecode
-        sc_url = f"{HYPERSCAN_API_BASE}/smart-contracts/{address}"
-        sc_response = requests.get(sc_url, headers={'Accept': 'application/json'}, timeout=30)
-        sc_response.raise_for_status()
-        sc_data = sc_response.json()
-        runtime = sc_data.get('deployed_bytecode')
-        if runtime:
-            return runtime, 'runtime'
+            tx_resp = requests.get(f"{HYPERSCAN_API}/transactions/{creation_tx}",
+                                   headers={"Accept": "application/json"}, timeout=10)
+            tx_resp.raise_for_status()
+            tx_data = tx_resp.json()
+            is_factory = tx_data.get("to") is not None
+            raw = tx_data.get("raw_input")
+            if raw and not is_factory:
+                if verbose:
+                    print(f"    Fetched creation bytecode ({len(raw)} chars)")
+                return raw, "creation"
+            if is_factory and verbose:
+                to_hash = tx_data["to"].get("hash", "?")[:14]
+                print(f"    Factory deploy via {to_hash}, using runtime")
     except Exception:
         pass
-    
-    # Final fallback: fetch runtime bytecode directly from RPC
-    runtime = fetch_runtime_bytecode_from_rpc(address)
-    if runtime:
-        return runtime, 'runtime'
-    
-    print(f"    Error: could not fetch bytecode for {address} from any source")
+
+    # Tier 2: runtime bytecode from Hyperscan
+    try:
+        resp = requests.get(f"{HYPERSCAN_API}/smart-contracts/{addr}",
+                            headers={"Accept": "application/json"}, timeout=30)
+        resp.raise_for_status()
+        runtime = resp.json().get("deployed_bytecode")
+        if runtime:
+            if verbose:
+                print(f"    Fetched runtime bytecode ({len(runtime)} chars, Hyperscan)")
+            return runtime, "runtime"
+    except Exception:
+        pass
+
+    # Tier 3: eth_getCode RPC
+    try:
+        resp = requests.post(HYPERLIQUID_RPC, json={
+            "jsonrpc": "2.0", "method": "eth_getCode",
+            "params": [addr, "latest"], "id": 1,
+        }, timeout=10)
+        resp.raise_for_status()
+        code = resp.json().get("result", "0x")
+        if code and code != "0x":
+            if verbose:
+                print(f"    Fetched runtime bytecode ({len(code)} chars, RPC)")
+            return code, "runtime"
+    except Exception:
+        pass
+
     return None, None
 
 
-def verify_single_contract_from_build(
-    name: str, 
-    address: str, 
-    source_info: dict, 
-    repo_dir: Path,
-    verbose: bool = False
-) -> dict:
-    result = {
+# ---------------------------------------------------------------------------
+# Repo build
+# ---------------------------------------------------------------------------
+def get_local_repo(repo: str) -> Optional[Path]:
+    """Return local lib/ path if the repo exists as a submodule."""
+    name = repo.split("/")[-1]
+    p = LIB_DIR / name
+    return p if p.exists() and (p / ".git").exists() else None
+
+
+def init_submodules(repo_dir: Path):
+    """Initialize submodules at their pinned commits."""
+    result = subprocess.run(
+        ["git", "submodule", "status"],
+        cwd=repo_dir, capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return
+    for line in result.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        commit = parts[0].lstrip("-+")
+        sub_path = parts[1]
+        subprocess.run(["git", "submodule", "init", sub_path],
+                       cwd=repo_dir, capture_output=True, timeout=30)
+        sub_dir = repo_dir / sub_path
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        url_r = subprocess.run(
+            ["git", "config", "--get", f"submodule.{sub_path}.url"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=10,
+        )
+        if url_r.returncode != 0:
+            continue
+        url = url_r.stdout.strip()
+        subprocess.run(["git", "init", "-q"], cwd=sub_dir, capture_output=True, timeout=10)
+        subprocess.run(["git", "remote", "add", "origin", url],
+                       cwd=sub_dir, capture_output=True, timeout=10)
+        subprocess.run(["git", "fetch", "--depth", "1", "origin", commit],
+                       cwd=sub_dir, capture_output=True, timeout=120)
+        subprocess.run(["git", "checkout", "FETCH_HEAD"],
+                       cwd=sub_dir, capture_output=True, timeout=30)
+
+    # Nested submodules (one level deep)
+    lib = repo_dir / "lib"
+    if lib.exists():
+        for d in lib.iterdir():
+            if d.is_dir() and (d / ".gitmodules").exists():
+                init_submodules(d)
+
+
+def patch_foundry_config(repo_dir: Path, settings: dict):
+    """Patch foundry.toml to match deployment compiler settings."""
+    toml = repo_dir / "foundry.toml"
+    if not toml.exists():
+        return
+    content = toml.read_text()
+
+    def _set(key: str, val: str, quoted: bool = False):
+        nonlocal content
+        v = f'"{val}"' if quoted else val
+        pattern = rf'{key}\s*=\s*["\']?[^"\'"\n]+["\']?'
+        if re.search(pattern, content):
+            content = re.sub(pattern, f'{key} = {v}', content)
+        elif "[profile.default]" in content:
+            content = content.replace("[profile.default]",
+                                      f"[profile.default]\n{key} = {v}")
+
+    _set("script", "disabled_script", quoted=True)
+    _set("test", "disabled_test", quoted=True)
+
+    if settings.get("optimization_enabled") is not None:
+        _set("optimizer", "true" if settings["optimization_enabled"] else "false")
+    if settings.get("optimization_runs") is not None:
+        _set("optimizer_runs", str(settings["optimization_runs"]))
+    if settings.get("evm_version"):
+        _set("evm_version", settings["evm_version"], quoted=True)
+    if settings.get("via_ir") is not None:
+        _set("via_ir", "true" if settings["via_ir"] else "false")
+    if settings.get("compiler_version"):
+        m = re.search(r"v?(\d+\.\d+\.\d+)", settings["compiler_version"])
+        if m:
+            _set("solc", m.group(1), quoted=True)
+
+    toml.write_text(content)
+
+
+def build_repo(repo: str, commit: str, settings: dict, verbose: bool = False
+               ) -> tuple[Optional[Path], bool, bool]:
+    """Build repo. Returns (repo_dir, success, is_temp)."""
+    local = get_local_repo(repo)
+    if local:
+        cur = subprocess.run(["git", "rev-parse", "HEAD"],
+                             cwd=local, capture_output=True, text=True).stdout.strip()
+        if cur == commit:
+            if verbose:
+                print(f"  Using local: {local}")
+            toml = local / "foundry.toml"
+            backup = toml.read_text() if toml.exists() else None
+            try:
+                patch_foundry_config(local, settings)
+                r = subprocess.run(["forge", "build", "--force"],
+                                   cwd=local, capture_output=True, text=True, timeout=600)
+                if r.returncode == 0:
+                    return local, True, False
+                if verbose:
+                    print(f"  Local build failed, cloning fresh...")
+            finally:
+                if backup is not None:
+                    toml.write_text(backup)
+
+    if verbose:
+        print(f"  Cloning {repo}@{commit[:12]}...")
+    tmp = tempfile.mkdtemp()
+    repo_dir = Path(tmp) / "repo"
+    repo_dir.mkdir()
+    url = f"https://github.com/{repo}.git"
+
+    subprocess.run(["git", "init", "-q"], cwd=repo_dir, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", url], cwd=repo_dir, capture_output=True)
+    r = subprocess.run(["git", "fetch", "--depth", "1", "origin", commit],
+                       cwd=repo_dir, capture_output=True, text=True)
+    if r.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, False, False
+    subprocess.run(["git", "checkout", "FETCH_HEAD"], cwd=repo_dir, capture_output=True)
+
+    if (repo_dir / ".gitmodules").exists():
+        if verbose:
+            print(f"  Initializing submodules...")
+        init_submodules(repo_dir)
+
+    patch_foundry_config(repo_dir, settings)
+
+    if verbose:
+        print(f"  Building...")
+    r = subprocess.run(["forge", "build", "--force"],
+                       cwd=repo_dir, capture_output=True, text=True, timeout=600)
+    return repo_dir, r.returncode == 0, True
+
+
+# ---------------------------------------------------------------------------
+# Artifact extraction
+# ---------------------------------------------------------------------------
+def find_artifact(repo_dir: Path, artifact_name: str, use_runtime: bool = False
+                  ) -> Optional[str]:
+    """Find compiled bytecode in Foundry out/ directory."""
+    out = repo_dir / "out"
+    if not out.exists():
+        return None
+    key = "deployedBytecode" if use_runtime else "bytecode"
+    target = artifact_name.lower()
+    for f in out.rglob("*.json"):
+        try:
+            with open(f) as fh:
+                data = json.load(fh)
+            name = data.get("contractName", "")
+            if name.lower() == target or f.stem.lower() == target:
+                bc = data.get(key, {}).get("object")
+                if bc and bc != "0x":
+                    return bc
+        except Exception:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Bytecode comparison
+# ---------------------------------------------------------------------------
+def strip_metadata(bc: str) -> str:
+    """Remove CBOR-encoded compiler metadata from bytecode."""
+    if bc.startswith("0x"):
+        bc = bc[2:]
+    marker = "a264697066735822"
+    end = "0033"
+    while marker in bc:
+        idx = bc.find(marker)
+        end_idx = bc.find(end, idx)
+        if end_idx != -1:
+            bc = bc[:idx] + bc[end_idx + len(end):]
+        else:
+            bc = bc[:idx]
+            break
+    return bc
+
+
+def _match_ignoring_immutables(deployed: str, compiled: str, details: dict) -> bool:
+    """Check if two same-length bytecodes differ only at immutable variable slots.
+
+    Immutable variables are zero in compiled output and filled with actual values
+    at deploy time. Every diff region in the compiled bytecode must be all zeros.
+    """
+    immutable_count = 0
+    i = 0
+    n = len(deployed)
+    while i < n:
+        if deployed[i] != compiled[i]:
+            start = i
+            while i < n and deployed[i] != compiled[i]:
+                i += 1
+            if not all(ch == "0" for ch in compiled[start:i]):
+                return False
+            immutable_count += 1
+        else:
+            i += 1
+    if immutable_count > 0:
+        details["immutable_vars"] = immutable_count
+        return True
+    return False
+
+
+def compare_bytecodes(deployed: str, compiled: str) -> tuple[bool, dict]:
+    """Compare bytecodes, accounting for constructor args, CREATE2 prefixes,
+    and immutable variables. Returns (match, details_dict).
+    """
+    details: dict = {}
+    d = strip_metadata(deployed)
+    c = strip_metadata(compiled)
+    details["deployed_size"] = len(d) // 2
+    details["compiled_size"] = len(c) // 2
+
+    if d == c:
+        return True, details
+
+    # Constructor args: deployed = compiled + ABI-encoded args (32-byte aligned)
+    if len(d) > len(c) and (len(d) - len(c)) % 64 == 0 and d[: len(c)] == c:
+        details["constructor_args_size"] = (len(d) - len(c)) // 2
+        return True, details
+
+    # CREATE2: deployed may have a prefix before the compiled code
+    if len(d) > len(c):
+        prefix_start = c[:40] if len(c) >= 40 else c
+        idx = d.find(prefix_start)
+        if idx > 0:
+            trimmed = d[idx:]
+            if trimmed == c:
+                details["create2_prefix_size"] = idx // 2
+                return True, details
+            extra = len(trimmed) - len(c)
+            if extra > 0 and extra % 64 == 0 and trimmed[: len(c)] == c:
+                details["create2_prefix_size"] = idx // 2
+                details["constructor_args_size"] = extra // 2
+                return True, details
+
+    # Immutable variables: same length, compiled has zero-filled slots
+    if len(d) == len(c):
+        if _match_ignoring_immutables(d, c, details):
+            return True, details
+
+    # Mismatch -- record first diff for debugging
+    for i, (a, b) in enumerate(zip(d, c)):
+        if a != b:
+            details["first_diff_position"] = i
+            details["first_diff_deployed"] = d[max(0, i - 20): i + 20]
+            details["first_diff_compiled"] = c[max(0, i - 20): i + 20]
+            break
+
+    return False, details
+
+
+# ---------------------------------------------------------------------------
+# Core verification
+# ---------------------------------------------------------------------------
+def verify_contracts(
+    contracts: list[tuple[str, str]],
+    mapping: dict,
+    verbose: bool = False,
+    skip_unmapped: bool = False,
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Verify contracts. Groups by (repo, commit, settings), builds once per group."""
+    verified: list[dict] = []
+    failed: list[dict] = []
+    skipped: list[str] = []
+
+    # Group by build key
+    groups: dict[tuple, list[tuple[str, str, dict]]] = {}
+    for name, address in contracts:
+        info = mapping.get(name)
+        if not info:
+            if skip_unmapped:
+                skipped.append(name)
+            else:
+                failed.append({"name": name, "address": address,
+                               "verified": False, "error": "No mapping"})
+            continue
+
+        key = (
+            info.get("repo", ""),
+            info.get("commit", ""),
+            info.get("compiler_version"),
+            info.get("optimization_enabled"),
+            info.get("optimization_runs"),
+            info.get("evm_version"),
+            info.get("via_ir"),
+        )
+        groups.setdefault(key, []).append((name, address, info))
+
+    if skipped:
+        print(f"\n  Skipping {len(skipped)} unmapped: {', '.join(skipped)}\n")
+
+    total_builds = len(groups)
+    for build_idx, (build_key, group) in enumerate(groups.items(), 1):
+        repo = group[0][2]["repo"]
+        commit = group[0][2]["commit"]
+        settings = {k: group[0][2].get(k) for k in
+                    ("compiler_version", "optimization_enabled",
+                     "optimization_runs", "evm_version", "via_ir")}
+
+        print(f"\n{'#' * 70}")
+        print(f"# [{build_idx}/{total_builds}] {repo}@{commit[:12]} ({len(group)} contracts)")
+        print(f"{'#' * 70}")
+
+        repo_dir, build_ok, is_temp = None, False, False
+        try:
+            repo_dir, build_ok, is_temp = build_repo(repo, commit, settings, verbose)
+        except Exception as e:
+            print(f"  Build error: {e}")
+
+        if not build_ok:
+            for name, address, _ in group:
+                failed.append({"name": name, "address": address,
+                               "verified": False, "error": f"Build failed: {repo}"})
+            continue
+
+        for ci, (name, address, info) in enumerate(group, 1):
+            print(f"  [{ci}/{len(group)}] {name}...", end=" ", flush=True)
+            result = _verify_one(name, address, info, repo_dir, verbose)
+            if result["verified"]:
+                verified.append(result)
+                print("VERIFIED")
+            else:
+                failed.append(result)
+                print(f"FAILED: {result['error']}")
+
+        if repo_dir and is_temp:
+            shutil.rmtree(repo_dir.parent, ignore_errors=True)
+
+    return verified, failed, skipped
+
+
+def _verify_one(name: str, address: str, info: dict, repo_dir: Path,
+                verbose: bool = False) -> dict:
+    """Verify a single contract using pre-built repo artifacts."""
+    result: dict = {
         "name": name,
         "address": address.lower(),
         "verified": False,
         "error": None,
         "details": {
-            "compiler_version": source_info.get('compiler_version'),
-            "optimization_runs": source_info.get('optimization_runs'),
-        }
+            "repo": info.get("repo"),
+            "commit": info.get("commit"),
+            "compiler_version": info.get("compiler_version"),
+            "optimization_runs": info.get("optimization_runs"),
+        },
     }
-    
-    artifact_name = source_info.get('artifact_name', name)
-    
-    deployed_bytecode, bytecode_type = fetch_creation_bytecode_from_hyperscan(address)
-    if not deployed_bytecode:
-        result['error'] = "Could not fetch deployed bytecode from Hyperscan"
+    artifact = info.get("artifact_name", name)
+
+    # Fetch deployed bytecode
+    deployed, bc_type = fetch_bytecode(address, verbose)
+    if not deployed:
+        result["error"] = "Could not fetch deployed bytecode"
         return result
-    
-    result['details']['bytecode_type'] = bytecode_type
-    use_runtime = bytecode_type == 'runtime'
-    
-    compiled_bytecode = extract_bytecode_from_artifacts(repo_dir, artifact_name, use_runtime=use_runtime)
-    if not compiled_bytecode:
-        # Artifact not in main build — try building the specific file (e.g., nested lib contracts)
-        file_path = source_info.get('file_path')
+    result["details"]["bytecode_type"] = bc_type
+    use_runtime = bc_type == "runtime"
+
+    # Find compiled artifact
+    compiled = find_artifact(repo_dir, artifact, use_runtime)
+    if not compiled:
+        file_path = info.get("file_path")
         if file_path:
             if verbose:
-                print(f"    Artifact not in main build, compiling {file_path}...")
-            build_result = subprocess.run(
-                ["forge", "build", file_path, "--force"],
-                cwd=repo_dir, capture_output=True, text=True, timeout=600
-            )
-            if build_result.returncode == 0:
-                compiled_bytecode = extract_bytecode_from_artifacts(repo_dir, artifact_name, use_runtime=use_runtime)
-        if not compiled_bytecode:
-            result['error'] = f"Artifact not found: {artifact_name}"
-            return result
-    
-    match = compare_bytecodes(deployed_bytecode, compiled_bytecode, result)
-    result['verified'] = match
-    
+                print(f"\n    Compiling {file_path}...", end=" ", flush=True)
+            subprocess.run(["forge", "build", file_path, "--force"],
+                           cwd=repo_dir, capture_output=True, text=True, timeout=600)
+            compiled = find_artifact(repo_dir, artifact, use_runtime)
+    if not compiled:
+        result["error"] = f"Artifact not found: {artifact}"
+        return result
+
+    # Compare
+    match, details = compare_bytecodes(deployed, compiled)
+    result["details"].update(details)
+    result["verified"] = match
+    if not match and not result["error"]:
+        result["error"] = "Bytecode mismatch"
     return result
 
 
-def extract_bytecode_from_artifacts(repo_dir: Path, artifact_name: str, use_runtime: bool = False) -> Optional[str]:
-    out_dir = repo_dir / "out"
-    if not out_dir.exists():
-        return None
-    
-    search_name = artifact_name.lower()
-    bytecode_key = 'deployedBytecode' if use_runtime else 'bytecode'
-    
-    for artifact_file in out_dir.rglob("*.json"):
-        try:
-            with open(artifact_file) as f:
-                data = json.load(f)
-                contract_name = data.get('contractName', '')
-                if contract_name.lower() == search_name or artifact_file.stem.lower() == search_name:
-                    bytecode = data.get(bytecode_key, {}).get('object')
-                    if bytecode and bytecode != '0x':
-                        return bytecode
-        except:
-            continue
-    
-    return None
-
-
-def compare_bytecodes(deployed: str, compiled: str, result: dict) -> bool:
-    """Compare deployed and compiled bytecodes."""
-    def strip_metadata(bc):
-        if bc.startswith('0x'):
-            bc = bc[2:]
-        marker = "a264697066735822"
-        end_marker = "0033"
-        while marker in bc:
-            idx = bc.find(marker)
-            end_idx = bc.find(end_marker, idx)
-            if end_idx != -1:
-                bc = bc[:idx] + bc[end_idx + len(end_marker):]
-            else:
-                bc = bc[:idx]
-                break
-        return bc
-    
-    deployed_stripped = strip_metadata(deployed)
-    compiled_stripped = strip_metadata(compiled)
-    
-    result['details']['deployed_size'] = len(deployed_stripped) // 2
-    result['details']['compiled_size'] = len(compiled_stripped) // 2
-    
-    if deployed_stripped == compiled_stripped:
-        return True
-    
-    # Check for constructor args
-    if len(deployed_stripped) > len(compiled_stripped):
-        diff = len(deployed_stripped) - len(compiled_stripped)
-        if diff % 64 == 0 and deployed_stripped[:len(compiled_stripped)] == compiled_stripped:
-            result['details']['constructor_args_size'] = diff // 2
-            return True
-    
-    # Handle CREATE2 deployments where init code may have a prefix (salt/factory data)
-    if len(deployed_stripped) > len(compiled_stripped):
-        compiled_start = compiled_stripped[:40]
-        prefix_idx = deployed_stripped.find(compiled_start)
-        if prefix_idx > 0:
-            deployed_trimmed = deployed_stripped[prefix_idx:]
-            if deployed_trimmed == compiled_stripped:
-                result['details']['create2_prefix_size'] = prefix_idx // 2
-                return True
-            # Check for constructor args after CREATE2 prefix
-            if len(deployed_trimmed) > len(compiled_stripped):
-                constructor_args_len = len(deployed_trimmed) - len(compiled_stripped)
-                if constructor_args_len % 64 == 0:
-                    deployed_without_args = deployed_trimmed[:len(compiled_stripped)]
-                    if deployed_without_args == compiled_stripped:
-                        result['details']['create2_prefix_size'] = prefix_idx // 2
-                        result['details']['constructor_args_size'] = constructor_args_len // 2
-                        return True
-    
-    # Log first diff position for debugging
-    for i, (a, b) in enumerate(zip(deployed_stripped, compiled_stripped)):
-        if a != b:
-            result['details']['first_diff_position'] = i
-            result['details']['first_diff_deployed'] = deployed_stripped[max(0, i-20):i+20]
-            result['details']['first_diff_compiled'] = compiled_stripped[max(0, i-20):i+20]
-            break
-    
-    result['error'] = "Bytecode mismatch"
-    return False
-
-
-def print_summary(verified: List[dict], failed: List[dict], skipped: List[str] = None):
-    print(f"\n{'='*80}")
-    print("VERIFICATION SUMMARY")
-    print(f"{'='*80}")
-    print(f"✅ Verified: {len(verified)}")
-    print(f"❌ Failed: {len(failed)}")
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+def print_summary(verified: list, failed: list, skipped: list):
+    total = len(verified) + len(failed) + len(skipped)
+    print(f"\n{'=' * 60}")
+    print(f"VERIFICATION SUMMARY")
+    print(f"{'=' * 60}")
+    print(f"  Verified: {len(verified)}")
+    print(f"  Failed:   {len(failed)}")
     if skipped:
-        print(f"⏭️  Skipped: {len(skipped)}")
-    print(f"Total: {len(verified) + len(failed) + (len(skipped) if skipped else 0)}")
-    
+        print(f"  Skipped:  {len(skipped)}")
+    print(f"  Total:    {total}")
     if failed:
         print(f"\nFailed contracts:")
-        for result in failed:
-            print(f"  - {result['name']}: {result['error']}")
-    
-    if skipped:
-        print(f"\nSkipped (no mapping):")
-        for name in skipped:
-            print(f"  - {name}")
+        for r in failed:
+            print(f"  - {r['name']}: {r['error']}")
 
 
-def save_report(verified: List[dict], failed: List[dict], output_path: str):
-    """Save verification report to JSON file"""
+def save_report(verified: list, failed: list, path: str):
     report = {
-        'verified': verified,
-        'failed': failed,
-        'summary': {
-            'total': len(verified) + len(failed),
-            'verified': len(verified),
-            'failed': len(failed)
-        }
+        "verified": verified,
+        "failed": failed,
+        "summary": {
+            "total": len(verified) + len(failed),
+            "verified": len(verified),
+            "failed": len(failed),
+        },
     }
-    with open(output_path, 'w') as f:
+    with open(path, "w") as f:
         json.dump(report, f, indent=2)
-    print(f"\n📄 Report saved to: {output_path}")
+    print(f"\nReport saved to: {path}")
 
 
-def check_source_mappings(contracts: List[Tuple[str, str]]) -> List[str]:
-    missing = []
-    for contract_info in contracts:
-        name = contract_info[0]
-        address = contract_info[1] if len(contract_info) > 1 else None
-        source_info = get_source_info_for_contract(name, address)
-        if not source_info:
-            missing.append(name)
-    return missing
-
-
-def verify_contract_list(
-    contracts: List[Tuple[str, str]], 
-    verbose: bool = False,
-    show_change_type: bool = False,
-    skip_unmapped: bool = False
-) -> Tuple[List[dict], List[dict], List[str]]:
-    verified = []
-    failed = []
-    skipped = []
-    
-    missing = check_source_mappings(contracts)
-    
-    if missing and not skip_unmapped:
-        print(f"\n{'='*80}")
-        print("❌ FATAL: Missing contract-mapping.json entries")
-        print(f"{'='*80}")
-        print("The following contracts have no mapping (run generate-contract-mapping.py):")
-        for name in missing:
-            print(f"  - {name}")
-        print("\nUse --skip-unmapped to skip these and verify the rest.")
-        print(f"{'='*80}\n")
-        for name in missing:
-            failed.append({
-                "name": name,
-                "verified": False,
-                "error": "No mapping in contract-mapping.json"
-            })
-        return verified, failed, skipped
-    
-    if missing:
-        print(f"\n⚠️  Skipping {len(missing)} unmapped contracts: {', '.join(missing)}\n")
-        skipped = missing
-    
-    for contract_info in contracts:
-        if show_change_type and len(contract_info) >= 3:
-            name, address, change_type = contract_info[0], contract_info[1], contract_info[2]
-            print(f"\n[{change_type.upper()}] {name}")
-        else:
-            name, address = contract_info[0], contract_info[1]
-        
-        if name in skipped:
-            continue
-        
-        verifier = ContractVerifier(address, name=name, verbose=verbose)
-        success = verifier.verify()
-        
-        if success:
-            verified.append(verifier.result)
-        else:
-            failed.append(verifier.result)
-    
-    return verified, failed, skipped
-
-
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description='Verify HyperEVM contract deployments')
-    parser.add_argument('--all', action='store_true', help='Verify all contracts')
-    parser.add_argument('--address', type=str, help='Verify specific contract address')
-    parser.add_argument('--file', type=str, help='Verify contracts from JSON file')
-    parser.add_argument('--changed-file', type=str, help='Verify contracts from changed addresses JSON (format: [{"name": "contractName", "address": "0x..."}])')
-    parser.add_argument('--name', type=str, help='Contract name (used with --address)')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    parser.add_argument('--output', '-o', type=str, help='Output JSON report file')
-    parser.add_argument('--skip-unmapped', action='store_true', help='Skip contracts not in contract-mapping.json')
-    parser.add_argument('--batch', action='store_true', help='Batch mode: compile once per repo (faster)')
-    
+    parser = argparse.ArgumentParser(description="Verify HyperEVM contract deployments")
+    parser.add_argument("--all", action="store_true", help="Verify all contracts")
+    parser.add_argument("--address", type=str, help="Single contract address")
+    parser.add_argument("--name", type=str, help="Contract name (with --address)")
+    parser.add_argument("--file", type=str, help="Address JSON file")
+    parser.add_argument("--changed-file", type=str,
+                        help="Changed-addresses JSON ([{name, address}])")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--output", "-o", type=str, help="Output JSON report path")
+    parser.add_argument("--skip-unmapped", action="store_true",
+                        help="Skip contracts without a mapping entry")
+
     args = parser.parse_args()
-    
+    mapping = load_mapping()
+
     if args.all:
-        verified, failed, skipped = verify_all_contracts(
-            verbose=args.verbose, skip_unmapped=args.skip_unmapped, batch=args.batch
-        )
-        print_summary(verified, failed, skipped)
-        
-        if args.output:
-            save_report(verified, failed, args.output)
-        
-        sys.exit(0 if len(failed) == 0 else 1)
-    
-    elif args.address:
-        verifier = ContractVerifier(args.address, name=args.name, verbose=args.verbose)
-        success = verifier.verify()
-        
-        if args.output:
-            with open(args.output, 'w') as f:
-                json.dump(verifier.result, f, indent=2)
-        
-        sys.exit(0 if success else 1)
-    
+        contracts = load_all_contracts()
     elif args.file:
-        filepath = Path(args.file)
-        if not filepath.exists():
-            print(f"Error: File not found: {filepath}")
-            sys.exit(1)
-        
-        addresses = load_address_file(filepath)
-        contracts = [(name, address) for name, address in addresses.items()]
-        verified, failed, skipped = verify_contract_list(
-            contracts, verbose=args.verbose, skip_unmapped=args.skip_unmapped
-        )
-        
-        print_summary(verified, failed, skipped)
-        
-        if args.output:
-            save_report(verified, failed, args.output)
-        
-        sys.exit(0 if len(failed) == 0 else 1)
-    
+        contracts = load_address_file(Path(args.file))
     elif args.changed_file:
-        filepath = Path(args.changed_file)
-        if not filepath.exists():
-            print(f"Error: File not found: {filepath}")
-            sys.exit(1)
-        
-        with open(filepath) as f:
-            changed_contracts = json.load(f)
-        
-        if not changed_contracts:
-            print("No contracts to verify")
-            sys.exit(0)
-        
-        contracts = [
-            (c['name'], c['address'], c.get('change_type', 'unknown')) 
-            for c in changed_contracts
-        ]
-        verified, failed, skipped = verify_contract_list(
-            contracts, verbose=args.verbose, show_change_type=True, skip_unmapped=args.skip_unmapped
-        )
-        
-        print_summary(verified, failed, skipped)
-        
-        if args.output:
-            save_report(verified, failed, args.output)
-        
-        sys.exit(0 if len(failed) == 0 else 1)
-    
+        contracts = load_changed_file(Path(args.changed_file))
+    elif args.address:
+        if not args.name:
+            parser.error("--name is required with --address")
+        contracts = [(args.name, args.address)]
     else:
         parser.print_help()
         sys.exit(1)
 
+    if not contracts:
+        print("No contracts to verify")
+        sys.exit(0)
 
-if __name__ == '__main__':
+    verified, failed, skipped = verify_contracts(
+        contracts, mapping,
+        verbose=args.verbose,
+        skip_unmapped=args.skip_unmapped,
+    )
+    print_summary(verified, failed, skipped)
+
+    if args.output:
+        save_report(verified, failed, args.output)
+
+    sys.exit(0 if not failed else 1)
+
+
+if __name__ == "__main__":
     main()

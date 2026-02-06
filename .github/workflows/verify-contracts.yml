@@ -3,84 +3,75 @@ name: Verify Contract Addresses
 on:
   pull_request:
     branches:
-      - main
+      - master
     paths:
       - 'addresses/**/*.json'
-      - 'EulerChains.json'
 
 jobs:
   verify-contracts:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout PR
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Need full history to compare with base
-      
+          fetch-depth: 0
+          submodules: recursive
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install Python dependencies
-        run: |
-          pip install requests
-      
+        run: pip install requests
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: nightly
-      
-      - name: Detect and verify changed addresses
-        id: verify
+
+      - name: Detect changed addresses
+        id: detect
         run: |
-          # Extract new/modified addresses from git diff
-          # Use set +o pipefail to handle grep returning exit code 1 when no matches found
           set +o pipefail
-          
           git diff origin/${{ github.base_ref }}..${{ github.sha }} -- 'addresses/**/*.json' | \
-            grep '^+' | grep '"0x' > /tmp/address_changes.txt || true
-          
+            grep '^+' | grep '"0x' > /tmp/raw_changes.txt || true
           set -o pipefail
-          
-          # Process the extracted lines with Python
+
           python3 -c "
           import sys, re, json
-          
           addresses = []
           try:
-              with open('/tmp/address_changes.txt', 'r') as f:
+              with open('/tmp/raw_changes.txt') as f:
                   for line in f:
                       line = line[1:].strip().rstrip(',')
-                      match = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
-                      if match:
-                          name, address = match.groups()
-                          if address.lower() != '0x0000000000000000000000000000000000000000':
-                              addresses.append({'name': name, 'address': address.lower()})
+                      m = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
+                      if m:
+                          name, addr = m.groups()
+                          if addr.lower() != '0x' + '0' * 40:
+                              addresses.append({'name': name, 'address': addr.lower()})
           except FileNotFoundError:
               pass
-          
           if addresses:
               with open('changed-addresses.json', 'w') as f:
                   json.dump(addresses, f, indent=2)
-              print(f'Found {len(addresses)} changed address(es):', file=sys.stderr)
-              for addr in addresses:
-                  print(f'  {addr[\"name\"]}: {addr[\"address\"]}', file=sys.stderr)
+              print(f'Found {len(addresses)} changed address(es)', file=sys.stderr)
           else:
-              print('No contract addresses found in diff', file=sys.stderr)
+              print('No contract addresses changed', file=sys.stderr)
           "
-          
-          if [ -f changed-addresses.json ]; then
-            python3 scripts/verify-contracts.py \
-              --changed-file changed-addresses.json \
-              --output verification-report.json \
-              --verbose
-          else
-            echo "No contract addresses changed"
-            exit 0
-          fi
-      
+
+          echo "has_changes=$(test -f changed-addresses.json && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify contracts
+        if: steps.detect.outputs.has_changes == 'true'
+        run: |
+          python3 scripts/verify-contracts.py \
+            --changed-file changed-addresses.json \
+            --output verification-report.json \
+            --skip-unmapped \
+            --verbose
+
       - name: Upload verification report
         if: always()
         uses: actions/upload-artifact@v4
@@ -88,93 +79,45 @@ jobs:
           name: verification-report
           path: verification-report.json
           if-no-files-found: ignore
-      
+
       - name: Comment on PR
-        if: failure()
+        if: always() && steps.detect.outputs.has_changes == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            
-            let report;
-            try {
-              report = JSON.parse(fs.readFileSync('verification-report.json', 'utf8'));
-            } catch (e) {
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: '❌ **Contract Verification Failed**\n\nUnable to read verification report. Please check the workflow logs for details.'
-              });
-              return;
-            }
-            
-            let comment = '❌ **Contract Verification Failed**\n\n';
-            comment += `**Summary:**\n`;
-            comment += `- ✅ Verified: ${report.summary.verified}\n`;
-            comment += `- ❌ Failed: ${report.summary.failed}\n`;
-            comment += `- 📊 Total: ${report.summary.total}\n\n`;
-            
-            if (report.failed && report.failed.length > 0) {
-              comment += '**Failed Contracts:**\n\n';
-              for (const contract of report.failed) {
-                comment += `- **${contract.name}** (\`${contract.address}\`)\n`;
-                comment += `  - Error: ${contract.error}\n\n`;
-              }
-            }
-            
-            comment += '\n---\n';
-            comment += '⚠️ **All contracts must be verified on Hyperscan before merging.**\n';
-            comment += 'Please verify the contracts manually at https://hyperscan.com and retry.';
-            
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
-      
-      - name: Comment success on PR
-        if: success()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            
+
             if (!fs.existsSync('verification-report.json')) {
               await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: '✅ **No contract address changes detected**\n\nThis PR does not modify any contract addresses.'
+                body: '**Contract Verification**: Unable to read report. Check workflow logs.'
               });
               return;
             }
-            
+
             const report = JSON.parse(fs.readFileSync('verification-report.json', 'utf8'));
-            
-            let comment = '✅ **All Contract Addresses Verified**\n\n';
-            comment += `**Summary:**\n`;
-            comment += `- ✅ Verified: ${report.summary.verified}\n`;
-            comment += `- ❌ Failed: ${report.summary.failed}\n`;
-            comment += `- 📊 Total: ${report.summary.total}\n\n`;
-            
-            if (report.verified && report.verified.length > 0) {
-              comment += '**Verified Contracts:**\n\n';
-              for (const contract of report.verified) {
-                comment += `- ✅ **${contract.name}** (\`${contract.address}\`)\n`;
-                comment += `  - Compiler: ${contract.details.compiler_version}\n`;
-                comment += `  - Optimizer Runs: ${contract.details.optimization_runs}\n`;
-                comment += `  - Size: ${contract.details.stripped_deployed_size} bytes\n\n`;
+            const ok = report.summary.failed === 0;
+            let body = ok
+              ? '**All Contract Addresses Verified**\n\n'
+              : '**Contract Verification Failed**\n\n';
+
+            body += `| Metric | Count |\n|---|---|\n`;
+            body += `| Verified | ${report.summary.verified} |\n`;
+            body += `| Failed | ${report.summary.failed} |\n`;
+            body += `| Total | ${report.summary.total} |\n\n`;
+
+            if (report.failed && report.failed.length > 0) {
+              body += '**Failed:**\n';
+              for (const c of report.failed) {
+                body += `- **${c.name}** (\`${c.address}\`): ${c.error}\n`;
               }
             }
-            
-            comment += '\n---\n';
-            comment += '✨ All contracts are verified on Hyperscan and match their source code!';
-            
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: comment
+              body: body
             });
