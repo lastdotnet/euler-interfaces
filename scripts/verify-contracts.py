@@ -26,7 +26,10 @@ import requests
 
 # Configuration
 HYPERSCAN_API_BASE = "https://www.hyperscan.com/api/v2"
+HYPERLIQUID_RPC = "https://rpc.hyperliquid.xyz/evm"
 REPO_ROOT = Path(__file__).parent.parent
+CONTRACT_MAPPING_FILE = REPO_ROOT / "contract-mapping.json"
+LIB_DIR = REPO_ROOT / "lib"
 
 DEFAULT_COMPILER_SETTINGS = {
     "compiler_version": "v0.8.24+commit.e11b9ed9",
@@ -35,169 +38,50 @@ DEFAULT_COMPILER_SETTINGS = {
     "evm_version": "cancun",
 }
 
-# Known source repository mappings
-SOURCE_REPOS = {
-    # Euler Vault Kit (Hyperscan names)
-    "EVault": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "GenericFactory": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "BalanceTracker": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "ProtocolConfig": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "SequenceRegistry": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    # Euler Vault Kit (JSON file aliases)
-    "eVaultFactory": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "eVaultImplementation": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "balanceTracker": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "protocolConfig": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
-    "sequenceRegistry": {"repo": "lastdotnet/euler-vault-kit", "commit": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"},
+CONTRACT_MAPPING: Dict[str, dict] = {}
+
+
+def load_contract_mapping() -> Dict[str, dict]:
+    global CONTRACT_MAPPING
+    if CONTRACT_MAPPING:
+        return CONTRACT_MAPPING
     
-    # Ethereum Vault Connector (euler-xyz only)
-    "EthereumVaultConnector": {"repo": "euler-xyz/ethereum-vault-connector", "tag": "v1.0.1"},
-    "evc": {"repo": "euler-xyz/ethereum-vault-connector", "tag": "v1.0.1"},
+    if not CONTRACT_MAPPING_FILE.exists():
+        print(f"Warning: {CONTRACT_MAPPING_FILE} not found. Run generate-contract-mapping.py first.")
+        return {}
     
-    # Permit2 (Uniswap)
-    "Permit2": {"repo": "Uniswap/permit2", "tag": "0x000000000022D473030F116dDEE9F6B43aC78BA3"},
-    "permit2": {"repo": "Uniswap/permit2", "tag": "0x000000000022D473030F116dDEE9F6B43aC78BA3"},
+    with open(CONTRACT_MAPPING_FILE) as f:
+        data = json.load(f)
     
-    # Euler Earn
-    "EulerEarn": {
-        "repo": "lastdotnet/euler-earn",
-        "commit": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345",
-        "submodules": ["lib/forge-std", "lib/openzeppelin-contracts", "lib/ethereum-vault-connector", "lib/euler-vault-kit"],
-        "contract_path": "src/EulerEarn.sol"
-    },
-    "EulerEarnFactory": {
-        "repo": "lastdotnet/euler-earn",
-        "commit": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345",
-        "submodules": ["lib/forge-std", "lib/openzeppelin-contracts", "lib/ethereum-vault-connector", "lib/euler-vault-kit"],
-        "contract_path": "src/EulerEarnFactory.sol"
-    },
-    "EulerEarnVault": {
-        "repo": "lastdotnet/euler-earn",
-        "commit": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345",
-        "submodules": ["lib/forge-std", "lib/openzeppelin-contracts", "lib/ethereum-vault-connector", "lib/euler-vault-kit"],
-        "contract_path": "src/EulerEarn.sol"
-    },
-    "eulerEarnFactory": {
-        "repo": "lastdotnet/euler-earn",
-        "commit": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345",
-        "submodules": ["lib/forge-std", "lib/openzeppelin-contracts", "lib/ethereum-vault-connector", "lib/euler-vault-kit"],
-        "contract_path": "src/EulerEarnFactory.sol"
-    },
+    CONTRACT_MAPPING = {}
+    for name, info in data.items():
+        CONTRACT_MAPPING[name] = {**info, "contract_name": name}
+        if "address" in info:
+            CONTRACT_MAPPING[info["address"].lower()] = {**info, "contract_name": name}
     
-    # Euler Swap - artifact names differ from JSON keys
-    "EulerSwapFactory": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
-    "EulerSwap": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
-    "EulerSwapPeriphery": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
-    "EulerSwapProtocolFeeConfig": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
-    "EulerSwapRegistry": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow"},
-    "eulerSwapV2Factory": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapFactory"},
-    "eulerSwapV2Implementation": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwap"},
-    "eulerSwapV2Periphery": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapPeriphery"},
-    "eulerSwapV2ProtocolFeeConfig": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapProtocolFeeConfig"},
-    "eulerSwapV2Registry": {"repo": "lastdotnet/euler-swap", "commit": "dd936d2baaacb9064cf919b1fb45ecaa002d2751", "submodules": "all-shallow", "artifact_name": "EulerSwapRegistry"},
+    return CONTRACT_MAPPING
+
+
+def get_local_repo_path(repo: str) -> Optional[Path]:
+    repo_name = repo.split("/")[-1]
+    local_path = LIB_DIR / repo_name
+    if local_path.exists() and (local_path / ".git").exists():
+        return local_path
+    return None
+
+
+def get_source_info_for_contract(name: str, address: Optional[str] = None) -> Optional[dict]:
+    mapping = load_contract_mapping()
     
-    # EVK Periphery - uses all-shallow to init all submodules + nested (non-recursive)
-    "AccountLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "VaultLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "OracleLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "IRMLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "UtilsLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EulerEarnVaultLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "accountLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "vaultLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "oracleLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "irmLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "utilsLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulerEarnVaultLens": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "Swapper": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "swapper": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "SwapVerifier": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "swapVerifier": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "TermsOfUseSigner": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "termsOfUseSigner": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "GovernedPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "governedPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EscrowedCollateralPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "escrowedCollateralPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EulerUngovernedPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulerUngoverned0xPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulerUngovernedNzxPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EVKFactoryPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "evkFactoryPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EulerEarnFactoryPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulerEarnFactoryPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EulerEarnGovernedPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulerEarnGovernedPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EdgeFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "edgeFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EdgeFactoryPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "edgeFactoryPerspective": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "IRMRegistry": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "irmRegistry": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "ExternalVaultRegistry": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "externalVaultRegistry": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "KinkIRMFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "kinkIRMFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "AdaptiveCurveIRMFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "adaptiveCurveIRMFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "EulerIRMAdaptiveCurveFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "CapRiskStewardFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "capRiskStewardFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "GovernorAccessControlEmergencyFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "governorAccessControlEmergencyFactory": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
+    if name in mapping:
+        return mapping[name]
     
-    # Price Oracle
-    "OracleRouterFactory": {"repo": "euler-xyz/euler-price-oracle", "commit": "ffc3cb82615fc7d003a7f431175bd1eaf0bf41c5", "submodules": "all-shallow"},
-    "EulerRouterFactory": {"repo": "euler-xyz/euler-price-oracle", "commit": "ffc3cb82615fc7d003a7f431175bd1eaf0bf41c5", "submodules": "all-shallow"},
-    "oracleRouterFactory": {"repo": "euler-xyz/euler-price-oracle", "commit": "ffc3cb82615fc7d003a7f431175bd1eaf0bf41c5", "submodules": "all-shallow"},
-    "OracleAdapterRegistry": {"repo": "euler-xyz/euler-price-oracle", "commit": "ffc3cb82615fc7d003a7f431175bd1eaf0bf41c5", "submodules": "all-shallow"},
-    "oracleAdapterRegistry": {"repo": "euler-xyz/euler-price-oracle", "commit": "ffc3cb82615fc7d003a7f431175bd1eaf0bf41c5", "submodules": "all-shallow"},
+    if address:
+        addr_lower = address.lower()
+        if addr_lower in mapping:
+            return mapping[addr_lower]
     
-    # Fee Flow (euler-xyz only)
-    "FeeFlowController": {"repo": "euler-xyz/fee-flow", "commit": "3bee858a1568d1313f37d615953f83391a897866"},
-    
-    # Reward Streams (deployed from evk-periphery which has reward-streams as submodule)
-    "RewardStreams": {
-        "repo": "euler-xyz/evk-periphery",
-        "commit": "89163cad3cbf562101ade9818ff5e28b1975624e",
-        "submodules": "all-shallow",
-        "contract_path": "lib/reward-streams/src/BaseRewardStreams.sol"
-    },
-    "TrackingRewardStreams": {
-        "repo": "euler-xyz/evk-periphery",
-        "commit": "89163cad3cbf562101ade9818ff5e28b1975624e",
-        "submodules": "all-shallow",
-        "contract_path": "lib/reward-streams/src/TrackingRewardStreams.sol"
-    },
-    
-    # Euler Earn extras
-    "PublicAllocator": {
-        "repo": "lastdotnet/euler-earn",
-        "commit": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345",
-        "submodules": ["lib/forge-std", "lib/openzeppelin-contracts", "lib/ethereum-vault-connector", "lib/euler-vault-kit"],
-        "contract_path": "src/PublicAllocator.sol"
-    },
-    "eulerEarnPublicAllocator": {
-        "repo": "lastdotnet/euler-earn",
-        "commit": "b2fd6e699ee20bcfe7459f375b3cee5d2fa53345",
-        "submodules": ["lib/forge-std", "lib/openzeppelin-contracts", "lib/ethereum-vault-connector", "lib/euler-vault-kit"],
-        "contract_path": "src/PublicAllocator.sol"
-    },
-    
-    # Governor contracts
-    "GovernorAccessControlEmergency": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "accessControlEmergencyGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow", "artifact_name": "GovernorAccessControlEmergency"},
-    "FactoryGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eVaultFactoryGovernor": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow", "artifact_name": "FactoryGovernor"},
-    "TimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0"},
-    "accessControlEmergencyGovernorAdminTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0", "artifact_name": "TimelockController"},
-    "accessControlEmergencyGovernorWildcardTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0", "artifact_name": "TimelockController"},
-    "eVaultFactoryTimelockController": {"repo": "OpenZeppelin/openzeppelin-contracts", "tag": "v5.0.0", "artifact_name": "TimelockController"},
-    
-    # OFT Bridge
-    "OFTAdapterUpgradeable": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow"},
-    "eulOFTAdapter": {"repo": "euler-xyz/evk-periphery", "commit": "89163cad3cbf562101ade9818ff5e28b1975624e", "submodules": "all-shallow", "artifact_name": "OFTAdapterUpgradeable"},
-}
+    return None
 
 
 class ContractVerifier:
@@ -286,7 +170,7 @@ class ContractVerifier:
             return True
     
     def fetch_deployed_bytecode(self) -> Optional[str]:
-        """Fetch deployed bytecode - tries creation tx first, falls back to runtime bytecode"""
+        """Fetch deployed bytecode - tries creation tx, Hyperscan runtime, then RPC fallback"""
         self.log("Fetching deployed bytecode...")
         
         try:
@@ -303,7 +187,7 @@ class ContractVerifier:
                     self.result['details']['bytecode_type'] = 'creation'
                     return bytecode
             
-            self.log("No creation tx, fetching runtime bytecode...")
+            self.log("No creation tx, fetching runtime bytecode from Hyperscan...")
             url = f"{HYPERSCAN_API_BASE}/smart-contracts/{self.address}"
             response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
             response.raise_for_status()
@@ -311,342 +195,195 @@ class ContractVerifier:
             
             bytecode = data.get('deployed_bytecode')
             if bytecode:
-                self.log(f"Fetched {len(bytecode)} chars of runtime bytecode")
+                self.log(f"Fetched {len(bytecode)} chars of runtime bytecode from Hyperscan")
                 self.result['details']['bytecode_type'] = 'runtime'
                 return bytecode
-            
-            self.result['error'] = "No bytecode found"
-            return None
-            
-        except Exception as e:
-            self.result['error'] = f"Failed to fetch bytecode: {str(e)}"
-            return None
+        except Exception:
+            pass
+        
+        # Final fallback: fetch runtime bytecode directly from RPC
+        self.log("Falling back to RPC eth_getCode...")
+        bytecode = fetch_runtime_bytecode_from_rpc(self.address)
+        if bytecode:
+            self.log(f"Fetched {len(bytecode)} chars of runtime bytecode from RPC")
+            self.result['details']['bytecode_type'] = 'runtime'
+            self.result['details']['bytecode_source'] = 'rpc'
+            return bytecode
+        
+        self.result['error'] = "No bytecode found from any source"
+        return None
     
     def compile_from_source(self) -> Optional[str]:
-        """Compile contract from source using repository mapping"""
         self.log("Compiling from source...")
         
-        source_info = SOURCE_REPOS.get(self.name)
-        if not source_info:
-            for contract_name, info in SOURCE_REPOS.items():
-                if contract_name.lower() in self.name.lower():
-                    source_info = info
-                    break
+        source_info = get_source_info_for_contract(self.name, self.address)
         
         if not source_info:
-            self.result['error'] = f"No source repository mapping found for {self.name}"
+            self.result['error'] = f"No mapping in contract-mapping.json for {self.name}"
             return None
         
+        repo = source_info.get('repo')
+        commit = source_info.get('commit')
+        artifact_name = source_info.get('artifact_name')
+        
+        if not repo or not commit:
+            self.result['error'] = f"Incomplete mapping for {self.name}: missing repo or commit"
+            return None
+        
+        self.result['details']['source_repo'] = repo
+        self.result['details']['source_commit'] = commit
+        self.result['details']['artifact_name'] = artifact_name
+        
+        local_repo = get_local_repo_path(repo)
+        
         try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                self.log(f"Cloning {source_info['repo']}...")
-                
-                repo_dir = Path(tmpdir) / "repo"
-                
-                if 'tag' in source_info:
-                    clone_cmd = ["git", "clone", "--depth", "1", "--branch", source_info['tag'], 
-                                 f"https://github.com/{source_info['repo']}.git", str(repo_dir)]
-                    subprocess.run(clone_cmd, check=True, capture_output=True)
-                elif 'commit' in source_info:
-                    commit = source_info['commit']
-                    repo_url = f"https://github.com/{source_info['repo']}.git"
-                    
-                    subprocess.run(["git", "init", "-q"], cwd=str(repo_dir.parent), capture_output=True)
-                    repo_dir.mkdir(exist_ok=True)
-                    subprocess.run(["git", "init", "-q"], cwd=repo_dir, capture_output=True)
-                    subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=repo_dir, capture_output=True)
-                    
-                    fetch_cmd = ["git", "fetch", "--depth", "1", "origin", commit]
-                    result = subprocess.run(fetch_cmd, cwd=repo_dir, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        self.result['error'] = f"Failed to fetch commit {commit}: {result.stderr}"
-                        return None
-                    
-                    checkout_cmd = ["git", "checkout", "FETCH_HEAD"]
-                    result = subprocess.run(checkout_cmd, cwd=repo_dir, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        self.result['error'] = f"Failed to checkout commit {commit}: {result.stderr}"
-                        return None
-                else:
-                    clone_cmd = ["git", "clone", "--depth", "1", 
-                                 f"https://github.com/{source_info['repo']}.git", str(repo_dir)]
-                    subprocess.run(clone_cmd, check=True, capture_output=True)
-                
-                if (repo_dir / ".gitmodules").exists():
-                    self.log("Initializing submodules...")
-                    submodule_config = source_info.get('submodules')
-                    if submodule_config == "all-shallow":
-                        self._init_submodules_exact(repo_dir)
-                        self._init_nested_submodules(repo_dir)
-                    elif submodule_config:
-                        for submodule in submodule_config:
-                            subprocess.run(
-                                ["git", "submodule", "update", "--init", "--recursive", "--depth", "1", submodule],
-                                cwd=repo_dir, capture_output=True, timeout=120
-                            )
-                    else:
-                        subprocess.run(
-                            ["git", "submodule", "update", "--init", "--recursive", "--depth", "1"],
-                            cwd=repo_dir, capture_output=True, timeout=300
-                        )
-                
-                self._patch_foundry_config(repo_dir)
-                
-                self.log("Building with Foundry...")
-                contract_path = source_info.get('contract_path')
-                if contract_path:
-                    build_cmd = ["forge", "build", contract_path, "--force"]
-                else:
-                    build_cmd = ["forge", "build", "--force"]
-                result = subprocess.run(build_cmd, cwd=repo_dir, capture_output=True, text=True)
-                
-                if result.returncode != 0:
-                    self.result['error'] = f"Forge build failed: {result.stderr}"
-                    return None
-                
-                use_runtime = self.result['details'].get('bytecode_type') == 'runtime'
-                artifact_name = source_info.get('artifact_name')
-                bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime, artifact_name=artifact_name)
+            if local_repo:
+                bytecode = self._compile_from_local_repo(local_repo, commit, artifact_name)
                 if bytecode:
-                    self.log(f"Compiled {len(bytecode)} chars of {'runtime' if use_runtime else 'creation'} bytecode")
-                else:
-                    self.result['error'] = f"Could not find contract bytecode in build artifacts"
-                
-                return bytecode
+                    return bytecode
+                self.log("Local build failed, trying fresh clone...")
+            
+            return self._compile_from_cloned_repo(repo, commit, artifact_name)
                 
         except Exception as e:
             self.result['error'] = f"Failed to compile from source: {str(e)}"
             return None
     
-    def _get_required_submodules(self, source_info: dict) -> Optional[List[str]]:
-        return source_info.get('submodules')
+    def _compile_from_local_repo(self, repo_dir: Path, expected_commit: str, artifact_name: Optional[str]) -> Optional[str]:
+        self.log(f"Using local repo: {repo_dir}")
+        
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True
+        )
+        current_commit = result.stdout.strip()
+        
+        if current_commit != expected_commit:
+            self.log(f"Warning: local commit {current_commit[:8]} differs from mapping {expected_commit[:8]}")
+            self.result['details']['commit_mismatch'] = True
+            self.result['details']['local_commit'] = current_commit
+        
+        # Back up foundry.toml before patching to avoid dirtying the working tree
+        foundry_toml = repo_dir / "foundry.toml"
+        original_config = foundry_toml.read_text() if foundry_toml.exists() else None
+        
+        try:
+            self._patch_foundry_config(repo_dir)
+            
+            self.log("Building with Foundry...")
+            build_cmd = ["forge", "build", "--force"]
+            result = subprocess.run(build_cmd, cwd=repo_dir, capture_output=True, text=True, timeout=600)
+            
+            if result.returncode != 0:
+                self.log(f"Local build failed: {result.stderr[:200]}...")
+                return None
+            
+            use_runtime = self.result['details'].get('bytecode_type') == 'runtime'
+            bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime, artifact_name=artifact_name)
+            if bytecode:
+                self.log(f"Compiled {len(bytecode)} chars of {'runtime' if use_runtime else 'creation'} bytecode")
+            
+            return bytecode
+        finally:
+            # Restore original foundry.toml
+            if original_config is not None:
+                foundry_toml.write_text(original_config)
+    
+    def _compile_from_cloned_repo(self, repo: str, commit: str, artifact_name: Optional[str]) -> Optional[str]:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.log(f"Cloning {repo}...")
+            
+            repo_dir = Path(tmpdir) / "repo"
+            repo_url = f"https://github.com/{repo}.git"
+            
+            repo_dir.mkdir(exist_ok=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, capture_output=True)
+            subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=repo_dir, capture_output=True)
+            
+            fetch_cmd = ["git", "fetch", "--depth", "1", "origin", commit]
+            result = subprocess.run(fetch_cmd, cwd=repo_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                self.result['error'] = f"Failed to fetch commit {commit}: {result.stderr}"
+                return None
+            
+            checkout_cmd = ["git", "checkout", "FETCH_HEAD"]
+            result = subprocess.run(checkout_cmd, cwd=repo_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                self.result['error'] = f"Failed to checkout commit {commit}: {result.stderr}"
+                return None
+            
+            if (repo_dir / ".gitmodules").exists():
+                self.log("Initializing submodules...")
+                self._init_submodules_exact(repo_dir)
+                self._init_nested_submodules(repo_dir)
+            
+            self._patch_foundry_config(repo_dir)
+            
+            self.log("Building with Foundry...")
+            build_cmd = ["forge", "build", "--force"]
+            result = subprocess.run(build_cmd, cwd=repo_dir, capture_output=True, text=True, timeout=600)
+            
+            if result.returncode != 0:
+                self.result['error'] = f"Forge build failed: {result.stderr}"
+                return None
+            
+            use_runtime = self.result['details'].get('bytecode_type') == 'runtime'
+            bytecode = self._extract_bytecode_from_artifacts(repo_dir, use_runtime=use_runtime, artifact_name=artifact_name)
+            if bytecode:
+                self.log(f"Compiled {len(bytecode)} chars of {'runtime' if use_runtime else 'creation'} bytecode")
+            else:
+                self.result['error'] = f"Could not find contract bytecode in build artifacts"
+            
+            return bytecode
     
     def _init_submodules_exact(self, repo_dir: Path):
-        """Initialize submodules at their exact pinned commits (not --depth 1 which gets latest)"""
-        result = subprocess.run(
-            ["git", "submodule", "status"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=30
-        )
-        if result.returncode != 0:
-            return
-        
-        for line in result.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                commit = parts[0].lstrip('-+')
-                submodule_path = parts[1]
-                
-                subprocess.run(["git", "submodule", "init", submodule_path], cwd=repo_dir, capture_output=True, timeout=30)
-                
-                submodule_dir = repo_dir / submodule_path
-                if not submodule_dir.exists():
-                    submodule_dir.mkdir(parents=True, exist_ok=True)
-                
-                url_result = subprocess.run(
-                    ["git", "config", "--get", f"submodule.{submodule_path}.url"],
-                    cwd=repo_dir, capture_output=True, text=True, timeout=10
-                )
-                if url_result.returncode != 0:
-                    continue
-                url = url_result.stdout.strip()
-                
-                subprocess.run(["git", "init", "-q"], cwd=submodule_dir, capture_output=True, timeout=10)
-                subprocess.run(["git", "remote", "add", "origin", url], cwd=submodule_dir, capture_output=True, timeout=10)
-                subprocess.run(["git", "fetch", "--depth", "1", "origin", commit], cwd=submodule_dir, capture_output=True, timeout=120)
-                subprocess.run(["git", "checkout", "FETCH_HEAD"], cwd=submodule_dir, capture_output=True, timeout=30)
+        """Delegate to the free function."""
+        init_submodules_exact(repo_dir)
     
     def _init_nested_submodules(self, repo_dir: Path):
-        """Initialize nested submodules in lib/* directories at their exact pinned commits"""
-        lib_dir = repo_dir / "lib"
-        if not lib_dir.exists():
-            return
-        
-        for subdir in lib_dir.iterdir():
-            if subdir.is_dir() and (subdir / ".gitmodules").exists():
-                self._init_submodules_exact(subdir)
+        """Delegate to the free function."""
+        init_nested_submodules(repo_dir)
     
     def _patch_foundry_config(self, repo_dir: Path):
-        """Patch foundry.toml with deployment compiler settings"""
-        foundry_toml = repo_dir / "foundry.toml"
-        if not foundry_toml.exists():
-            return
-        
-        content = foundry_toml.read_text()
-        
-        optimization_enabled = self.result['details'].get('optimization_enabled')
-        if optimization_enabled is not None:
-            optimizer_value = "true" if optimization_enabled else "false"
-            if re.search(r'optimizer\s*=\s*(true|false)', content):
-                content = re.sub(
-                    r'optimizer\s*=\s*(true|false)',
-                    f'optimizer = {optimizer_value}',
-                    content
-                )
-            else:
-                content = content.replace('[profile.default]', f'[profile.default]\noptimizer = {optimizer_value}')
-        
-        optimizer_runs = self.result['details'].get('optimization_runs')
-        if optimizer_runs is not None:
-            if re.search(r'optimizer_runs\s*=\s*[\d_]+', content):
-                content = re.sub(
-                    r'optimizer_runs\s*=\s*[\d_]+',
-                    f'optimizer_runs = {optimizer_runs}',
-                    content
-                )
-            elif optimization_enabled:
-                content = content.replace('[profile.default]', f'[profile.default]\noptimizer_runs = {optimizer_runs}')
-        
-        compiler_version = self.result['details'].get('compiler_version', '')
-        if compiler_version:
-            match = re.search(r'v?(\d+\.\d+\.\d+)', compiler_version)
-            if match:
-                solc_version = match.group(1)
-                if re.search(r'solc\s*=\s*"[\d\.]+"', content):
-                    content = re.sub(
-                        r'solc\s*=\s*"[\d\.]+"',
-                        f'solc = "{solc_version}"',
-                        content
-                    )
-                else:
-                    content = content.replace('[profile.default]', f'[profile.default]\nsolc = "{solc_version}"')
-        
-        evm_version = self.result['details'].get('evm_version')
-        if evm_version:
-            if re.search(r'evm_version\s*=\s*"[^"]+"', content):
-                content = re.sub(
-                    r'evm_version\s*=\s*"[^"]+"',
-                    f'evm_version = "{evm_version}"',
-                    content
-                )
-            else:
-                content = content.replace('[profile.default]', f'[profile.default]\nevm_version = "{evm_version}"')
-        
-        via_ir = self.result['details'].get('via_ir')
-        if via_ir is not None:
-            via_ir_value = "true" if via_ir else "false"
-            if re.search(r'via_ir\s*=\s*(true|false)', content):
-                content = re.sub(
-                    r'via_ir\s*=\s*(true|false)',
-                    f'via_ir = {via_ir_value}',
-                    content
-                )
-            else:
-                content = content.replace('[profile.default]', f'[profile.default]\nvia_ir = {via_ir_value}')
-        
-        # Exclude script and test folders to avoid missing dependency errors from uninitialized submodules
-        if re.search(r'script\s*=\s*["\'][^"\']+["\']', content):
-            content = re.sub(r'script\s*=\s*["\'][^"\']+["\']', 'script = "disabled_script"', content)
-        else:
-            content = content.replace('[profile.default]', '[profile.default]\nscript = "disabled_script"')
-        
-        if re.search(r'test\s*=\s*["\'][^"\']+["\']', content):
-            content = re.sub(r'test\s*=\s*["\'][^"\']+["\']', 'test = "disabled_test"', content)
-        else:
-            content = content.replace('[profile.default]', '[profile.default]\ntest = "disabled_test"')
-        
-        foundry_toml.write_text(content)
+        """Delegate to the free function, converting instance details to a settings dict."""
+        compiler_settings = {
+            "compiler_version": self.result['details'].get('compiler_version'),
+            "optimization_enabled": self.result['details'].get('optimization_enabled'),
+            "optimization_runs": self.result['details'].get('optimization_runs'),
+            "evm_version": self.result['details'].get('evm_version'),
+            "via_ir": self.result['details'].get('via_ir'),
+        }
+        patch_foundry_config_for_repo(repo_dir, compiler_settings)
     
     def _extract_bytecode_from_artifacts(self, repo_dir: Path, use_runtime: bool = False, artifact_name: Optional[str] = None) -> Optional[str]:
-        """Extract bytecode from Foundry build artifacts"""
-        out_dir = repo_dir / "out"
-        if not out_dir.exists():
-            return None
-        
-        search_name = (artifact_name or self.name).lower()
-        bytecode_key = 'deployedBytecode' if use_runtime else 'bytecode'
-        
-        for artifact_file in out_dir.rglob("*.json"):
-            try:
-                with open(artifact_file) as f:
-                    data = json.load(f)
-                    contract_name = data.get('contractName', '')
-                    if contract_name.lower() == search_name or artifact_file.stem.lower() == search_name:
-                        bytecode = data.get(bytecode_key, {}).get('object')
-                        if bytecode and bytecode != '0x':
-                            return bytecode
-            except:
-                continue
-        
-        return None
+        """Delegate to the free function."""
+        name = artifact_name or self.name
+        return extract_bytecode_from_artifacts(repo_dir, name, use_runtime=use_runtime)
     
     def compare_bytecodes(self, deployed: str, compiled: str) -> bool:
-        """Compare deployed and compiled bytecodes (excluding metadata and constructor args)"""
+        """Compare deployed and compiled bytecodes, delegating to the standalone function."""
         self.log("Comparing bytecodes...")
         
-        deployed_stripped = self._strip_metadata(deployed)
-        compiled_stripped = self._strip_metadata(compiled)
+        # Store raw sizes for verbose output
+        self.result['details']['stripped_deployed_size'] = self.result['details'].get('deployed_size', 0)
+        self.result['details']['stripped_compiled_size'] = self.result['details'].get('compiled_size', 0)
         
-        self.result['details']['deployed_size'] = len(deployed) // 2
-        self.result['details']['compiled_size'] = len(compiled) // 2
-        self.result['details']['stripped_deployed_size'] = len(deployed_stripped) // 2
-        self.result['details']['stripped_compiled_size'] = len(compiled_stripped) // 2
+        match = compare_bytecodes(deployed, compiled, self.result)
         
-        if deployed_stripped == compiled_stripped:
-            self.log("✅ Bytecodes match!")
-            return True
-        
-        # Deployed bytecode may have constructor args appended - try matching up to compiled length
-        if len(deployed_stripped) > len(compiled_stripped):
-            constructor_args_len = len(deployed_stripped) - len(compiled_stripped)
-            if constructor_args_len % 64 == 0:  # Constructor args are 32-byte aligned
-                deployed_without_args = deployed_stripped[:len(compiled_stripped)]
-                if deployed_without_args == compiled_stripped:
-                    self.log(f"✅ Bytecodes match (excluding {constructor_args_len // 2} bytes of constructor args)")
-                    self.result['details']['constructor_args_size'] = constructor_args_len // 2
-                    return True
-        
-        # Handle CREATE2 deployments where init code may have a prefix (salt/factory data)
-        if len(deployed_stripped) > len(compiled_stripped):
-            compiled_start = compiled_stripped[:40]
-            prefix_idx = deployed_stripped.find(compiled_start)
-            if prefix_idx > 0:
-                deployed_trimmed = deployed_stripped[prefix_idx:]
-                if deployed_trimmed == compiled_stripped:
-                    self.log(f"✅ Bytecodes match (CREATE2 deployment with {prefix_idx // 2} byte prefix)")
-                    self.result['details']['create2_prefix_size'] = prefix_idx // 2
-                    return True
-                # Check for constructor args after CREATE2 prefix
-                if len(deployed_trimmed) > len(compiled_stripped):
-                    constructor_args_len = len(deployed_trimmed) - len(compiled_stripped)
-                    if constructor_args_len % 64 == 0:
-                        deployed_without_args = deployed_trimmed[:len(compiled_stripped)]
-                        if deployed_without_args == compiled_stripped:
-                            self.log(f"✅ Bytecodes match (CREATE2 + {constructor_args_len // 2} bytes constructor args)")
-                            self.result['details']['create2_prefix_size'] = prefix_idx // 2
-                            self.result['details']['constructor_args_size'] = constructor_args_len // 2
-                            return True
-        
-        self.log("❌ Bytecodes differ")
-        for i, (a, b) in enumerate(zip(deployed_stripped, compiled_stripped)):
-            if a != b:
-                self.result['details']['first_diff_position'] = i
-                self.result['details']['first_diff_deployed'] = deployed_stripped[max(0, i-20):i+20]
-                self.result['details']['first_diff_compiled'] = compiled_stripped[max(0, i-20):i+20]
-                break
-        self.result['error'] = "Bytecode mismatch"
-        return False
-    
-    def _strip_metadata(self, bytecode: str) -> str:
-        """Remove ALL CBOR metadata sections from bytecode (handles embedded contracts)"""
-        if bytecode.startswith('0x'):
-            bytecode = bytecode[2:]
-        
-        marker = "a264697066735822"
-        end_marker = "0033"
-        
-        result = bytecode
-        while marker in result:
-            idx = result.find(marker)
-            end_idx = result.find(end_marker, idx)
-            if end_idx != -1:
-                result = result[:idx] + result[end_idx + len(end_marker):]
+        if match:
+            details = self.result['details']
+            if 'create2_prefix_size' in details and 'constructor_args_size' in details:
+                self.log(f"✅ Bytecodes match (CREATE2 + {details['constructor_args_size']} bytes constructor args)")
+            elif 'create2_prefix_size' in details:
+                self.log(f"✅ Bytecodes match (CREATE2 deployment with {details['create2_prefix_size']} byte prefix)")
+            elif 'constructor_args_size' in details:
+                self.log(f"✅ Bytecodes match (excluding {details['constructor_args_size']} bytes of constructor args)")
             else:
-                result = result[:idx]
-                break
+                self.log("✅ Bytecodes match!")
+        else:
+            self.log("❌ Bytecodes differ")
         
-        return result
+        return match
     
     def verify(self) -> bool:
         """Run full verification process"""
@@ -701,8 +438,7 @@ def load_address_file(filepath: Path) -> Dict[str, str]:
     return {k: v for k, v in data.items() if v != "0x0000000000000000000000000000000000000000"}
 
 
-def verify_all_contracts(verbose: bool = False) -> Tuple[List[dict], List[dict]]:
-    """Verify all contracts in the repository"""
+def verify_all_contracts(verbose: bool = False, skip_unmapped: bool = False, batch: bool = False) -> Tuple[List[dict], List[dict], List[str]]:
     address_files = [
         "addresses/999/CoreAddresses.json",
         "addresses/999/LensAddresses.json",
@@ -712,45 +448,506 @@ def verify_all_contracts(verbose: bool = False) -> Tuple[List[dict], List[dict]]
         "addresses/999/BridgeAddresses.json",
     ]
     
-    verified = []
-    failed = []
-    
+    all_contracts = []
     for address_file in address_files:
         filepath = REPO_ROOT / address_file
         if not filepath.exists():
             continue
+        addresses = load_address_file(filepath)
+        for name, address in addresses.items():
+            all_contracts.append((name, address))
+    
+    if batch:
+        return verify_contracts_batched(all_contracts, verbose=verbose, skip_unmapped=skip_unmapped)
+    return verify_contract_list(all_contracts, verbose=verbose, skip_unmapped=skip_unmapped)
+
+
+def verify_contracts_batched(
+    contracts: List[Tuple[str, str]], 
+    verbose: bool = False,
+    skip_unmapped: bool = False
+) -> Tuple[List[dict], List[dict], List[str]]:
+    """Batch verification: compile once per repo, verify all contracts from that repo's artifacts."""
+    verified = []
+    failed = []
+    skipped = []
+    
+    # Pre-load the mapping cache
+    load_contract_mapping()
+    
+    # Group contracts by (repo, compiler settings) so each unique settings combination gets its own build
+    def _settings_key(info: dict) -> tuple:
+        return (
+            info.get('repo', ''),
+            info.get('commit', ''),
+            info.get('compiler_version'),
+            info.get('optimization_enabled'),
+            info.get('optimization_runs'),
+            info.get('evm_version'),
+            info.get('via_ir'),
+        )
+    
+    by_build: Dict[tuple, List[Tuple[str, str, dict]]] = {}
+    for name, address in contracts:
+        source_info = get_source_info_for_contract(name, address)
+        if not source_info:
+            if skip_unmapped:
+                skipped.append(name)
+            else:
+                failed.append({"name": name, "verified": False, "error": "No mapping in contract-mapping.json"})
+            continue
         
+        key = _settings_key(source_info)
+        if key not in by_build:
+            by_build[key] = []
+        by_build[key].append((name, address, source_info))
+    
+    if skipped:
+        print(f"\n⚠️  Skipping {len(skipped)} unmapped contracts: {', '.join(skipped)}\n")
+    
+    total_builds = len(by_build)
+    for build_idx, (build_key, group_contracts) in enumerate(by_build.items(), 1):
+        repo = group_contracts[0][2].get('repo', '')
         print(f"\n{'#'*80}")
-        print(f"# Processing: {address_file}")
+        print(f"# [{build_idx}/{total_builds}] Building repo: {repo} ({len(group_contracts)} contracts)")
         print(f"{'#'*80}")
         
-        addresses = load_address_file(filepath)
+        # Use compiler settings from the group (all contracts in this group share the same settings)
+        first_info = group_contracts[0][2]
+        commit = first_info.get('commit')
+        repo_dir = None
+        build_success = False
+        is_temp = False
         
-        for name, address in addresses.items():
-            verifier = ContractVerifier(address, name=name, verbose=verbose)
-            success = verifier.verify()
+        compiler_settings = {
+            "compiler_version": first_info.get('compiler_version'),
+            "optimization_enabled": first_info.get('optimization_enabled'),
+            "optimization_runs": first_info.get('optimization_runs'),
+            "evm_version": first_info.get('evm_version'),
+            "via_ir": first_info.get('via_ir'),
+        }
+        
+        try:
+            repo_dir, build_success, is_temp = setup_and_build_repo(repo, commit, compiler_settings, verbose)
+        except Exception as e:
+            print(f"  ❌ Failed to build repo: {e}")
+        
+        if not build_success:
+            for name, address, source_info in group_contracts:
+                failed.append({"name": name, "address": address, "verified": False, "error": f"Repo build failed: {repo}"})
+            continue
+        
+        # Verify each contract from this build
+        for contract_idx, (name, address, source_info) in enumerate(group_contracts, 1):
+            print(f"\n  [{contract_idx}/{len(group_contracts)}] Verifying: {name}")
             
-            if success:
-                verified.append(verifier.result)
+            result = verify_single_contract_from_build(
+                name, address, source_info, repo_dir, verbose
+            )
+            
+            if result.get('verified'):
+                verified.append(result)
+                print(f"    ✅ VERIFIED")
             else:
-                failed.append(verifier.result)
+                failed.append(result)
+                print(f"    ❌ FAILED: {result.get('error', 'Unknown error')}")
+        
+        # Cleanup temp dir if it was created
+        if repo_dir and is_temp:
+            import shutil
+            shutil.rmtree(repo_dir, ignore_errors=True)
     
-    return verified, failed
+    return verified, failed, skipped
 
 
-def print_summary(verified: List[dict], failed: List[dict]):
-    """Print verification summary"""
+def setup_and_build_repo(repo: str, commit: str, compiler_settings: dict, verbose: bool = False) -> Tuple[Optional[Path], bool, bool]:
+    """Returns (repo_dir, build_success, is_temp_dir)."""
+    local_repo = get_local_repo_path(repo)
+    if local_repo:
+        current_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, capture_output=True, text=True
+        ).stdout.strip()
+        
+        if current_commit == commit:
+            print(f"  Using local repo: {local_repo} (commit matches)")
+            # Back up foundry.toml before patching to avoid dirtying the working tree
+            foundry_toml = local_repo / "foundry.toml"
+            original_config = foundry_toml.read_text() if foundry_toml.exists() else None
+            try:
+                patch_foundry_config_for_repo(local_repo, compiler_settings)
+                result = subprocess.run(
+                    ["forge", "build", "--force"], 
+                    cwd=local_repo, capture_output=True, text=True, timeout=600
+                )
+                if result.returncode == 0:
+                    return local_repo, True, False
+                print(f"  Local build failed, cloning fresh...")
+            finally:
+                # Restore original foundry.toml
+                if original_config is not None:
+                    foundry_toml.write_text(original_config)
+        else:
+            print(f"  Local repo at {current_commit[:8]}, need {commit[:8]}, cloning fresh...")
+    
+    print(f"  Cloning {repo} at {commit[:8]}...")
+    tmpdir = tempfile.mkdtemp()
+    repo_dir = Path(tmpdir) / "repo"
+    repo_dir.mkdir()
+    
+    repo_url = f"https://github.com/{repo}.git"
+    subprocess.run(["git", "init", "-q"], cwd=repo_dir, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=repo_dir, capture_output=True)
+    
+    result = subprocess.run(
+        ["git", "fetch", "--depth", "1", "origin", commit],
+        cwd=repo_dir, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return None, False, False
+    
+    subprocess.run(["git", "checkout", "FETCH_HEAD"], cwd=repo_dir, capture_output=True)
+    
+    if (repo_dir / ".gitmodules").exists():
+        print(f"  Initializing submodules...")
+        init_submodules_exact(repo_dir)
+        init_nested_submodules(repo_dir)
+    
+    patch_foundry_config_for_repo(repo_dir, compiler_settings)
+    
+    print(f"  Building with Foundry...")
+    result = subprocess.run(
+        ["forge", "build", "--force"],
+        cwd=repo_dir, capture_output=True, text=True, timeout=600
+    )
+    
+    return repo_dir, result.returncode == 0, True
+
+
+def patch_foundry_config_for_repo(repo_dir: Path, compiler_settings: dict):
+    foundry_toml = repo_dir / "foundry.toml"
+    if not foundry_toml.exists():
+        return
+    
+    content = foundry_toml.read_text()
+    
+    if re.search(r'script\s*=\s*["\'][^"\']+["\']', content):
+        content = re.sub(r'script\s*=\s*["\'][^"\']+["\']', 'script = "disabled_script"', content)
+    else:
+        content = content.replace('[profile.default]', '[profile.default]\nscript = "disabled_script"')
+    
+    if re.search(r'test\s*=\s*["\'][^"\']+["\']', content):
+        content = re.sub(r'test\s*=\s*["\'][^"\']+["\']', 'test = "disabled_test"', content)
+    else:
+        content = content.replace('[profile.default]', '[profile.default]\ntest = "disabled_test"')
+    
+    if compiler_settings.get('optimization_enabled') is not None:
+        opt_val = "true" if compiler_settings['optimization_enabled'] else "false"
+        if re.search(r'optimizer\s*=\s*(true|false)', content):
+            content = re.sub(r'optimizer\s*=\s*(true|false)', f'optimizer = {opt_val}', content)
+        else:
+            content = content.replace('[profile.default]', f'[profile.default]\noptimizer = {opt_val}')
+    
+    if compiler_settings.get('optimization_runs') is not None:
+        runs = compiler_settings['optimization_runs']
+        if re.search(r'optimizer_runs\s*=\s*[\d_]+', content):
+            content = re.sub(r'optimizer_runs\s*=\s*[\d_]+', f'optimizer_runs = {runs}', content)
+        else:
+            content = content.replace('[profile.default]', f'[profile.default]\noptimizer_runs = {runs}')
+    
+    if compiler_settings.get('evm_version'):
+        evm = compiler_settings['evm_version']
+        if re.search(r'evm_version\s*=\s*"[^"]+"', content):
+            content = re.sub(r'evm_version\s*=\s*"[^"]+"', f'evm_version = "{evm}"', content)
+        else:
+            content = content.replace('[profile.default]', f'[profile.default]\nevm_version = "{evm}"')
+    
+    if compiler_settings.get('via_ir') is not None:
+        via_ir_val = "true" if compiler_settings['via_ir'] else "false"
+        if re.search(r'via_ir\s*=\s*(true|false)', content):
+            content = re.sub(r'via_ir\s*=\s*(true|false)', f'via_ir = {via_ir_val}', content)
+        else:
+            content = content.replace('[profile.default]', f'[profile.default]\nvia_ir = {via_ir_val}')
+    
+    if compiler_settings.get('compiler_version'):
+        match = re.search(r'v?(\d+\.\d+\.\d+)', compiler_settings['compiler_version'])
+        if match:
+            solc_ver = match.group(1)
+            if re.search(r'solc\s*=\s*"[\d\.]+"', content):
+                content = re.sub(r'solc\s*=\s*"[\d\.]+"', f'solc = "{solc_ver}"', content)
+            else:
+                content = content.replace('[profile.default]', f'[profile.default]\nsolc = "{solc_ver}"')
+    
+    foundry_toml.write_text(content)
+
+
+def init_submodules_exact(repo_dir: Path):
+    """Initialize submodules at their exact pinned commits."""
+    result = subprocess.run(
+        ["git", "submodule", "status"],
+        cwd=repo_dir, capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        return
+    
+    for line in result.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            commit = parts[0].lstrip('-+')
+            submodule_path = parts[1]
+            
+            subprocess.run(["git", "submodule", "init", submodule_path], cwd=repo_dir, capture_output=True, timeout=30)
+            
+            submodule_dir = repo_dir / submodule_path
+            if not submodule_dir.exists():
+                submodule_dir.mkdir(parents=True, exist_ok=True)
+            
+            url_result = subprocess.run(
+                ["git", "config", "--get", f"submodule.{submodule_path}.url"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10
+            )
+            if url_result.returncode != 0:
+                continue
+            url = url_result.stdout.strip()
+            
+            subprocess.run(["git", "init", "-q"], cwd=submodule_dir, capture_output=True, timeout=10)
+            subprocess.run(["git", "remote", "add", "origin", url], cwd=submodule_dir, capture_output=True, timeout=10)
+            subprocess.run(["git", "fetch", "--depth", "1", "origin", commit], cwd=submodule_dir, capture_output=True, timeout=120)
+            subprocess.run(["git", "checkout", "FETCH_HEAD"], cwd=submodule_dir, capture_output=True, timeout=30)
+
+
+def init_nested_submodules(repo_dir: Path):
+    """Initialize nested submodules in lib/* directories."""
+    lib_dir = repo_dir / "lib"
+    if not lib_dir.exists():
+        return
+    
+    for subdir in lib_dir.iterdir():
+        if subdir.is_dir() and (subdir / ".gitmodules").exists():
+            init_submodules_exact(subdir)
+
+
+def fetch_runtime_bytecode_from_rpc(address: str) -> Optional[str]:
+    """Fetch runtime bytecode directly from Hyperliquid EVM RPC via eth_getCode."""
+    try:
+        response = requests.post(
+            HYPERLIQUID_RPC,
+            json={"jsonrpc": "2.0", "method": "eth_getCode", "params": [address, "latest"], "id": 1},
+            timeout=10
+        )
+        response.raise_for_status()
+        result = response.json().get('result', '0x')
+        if result and result != '0x':
+            return result
+        return None
+    except Exception:
+        return None
+
+
+def fetch_creation_bytecode_from_hyperscan(address: str) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch creation bytecode by looking up the creation tx, falling back to runtime bytecode.
+    
+    Falls back through: creation tx -> Hyperscan runtime -> RPC eth_getCode.
+    Returns (bytecode, type) where type is 'creation' or 'runtime'.
+    """
+    try:
+        # First get the creation tx hash from Hyperscan
+        url = f"{HYPERSCAN_API_BASE}/addresses/{address}"
+        response = requests.get(url, headers={'Accept': 'application/json'}, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        creation_tx = data.get('creation_transaction_hash')
+        if creation_tx:
+            # Fetch the raw creation bytecode from the tx
+            tx_url = f"{HYPERSCAN_API_BASE}/transactions/{creation_tx}"
+            tx_response = requests.get(tx_url, headers={'Accept': 'application/json'}, timeout=10)
+            tx_response.raise_for_status()
+            tx_data = tx_response.json()
+            bytecode = tx_data.get('raw_input')
+            if bytecode:
+                return bytecode, 'creation'
+        
+        # Fall back to Hyperscan runtime bytecode
+        sc_url = f"{HYPERSCAN_API_BASE}/smart-contracts/{address}"
+        sc_response = requests.get(sc_url, headers={'Accept': 'application/json'}, timeout=30)
+        sc_response.raise_for_status()
+        sc_data = sc_response.json()
+        runtime = sc_data.get('deployed_bytecode')
+        if runtime:
+            return runtime, 'runtime'
+    except Exception:
+        pass
+    
+    # Final fallback: fetch runtime bytecode directly from RPC
+    runtime = fetch_runtime_bytecode_from_rpc(address)
+    if runtime:
+        return runtime, 'runtime'
+    
+    print(f"    Error: could not fetch bytecode for {address} from any source")
+    return None, None
+
+
+def verify_single_contract_from_build(
+    name: str, 
+    address: str, 
+    source_info: dict, 
+    repo_dir: Path,
+    verbose: bool = False
+) -> dict:
+    result = {
+        "name": name,
+        "address": address.lower(),
+        "verified": False,
+        "error": None,
+        "details": {
+            "compiler_version": source_info.get('compiler_version'),
+            "optimization_runs": source_info.get('optimization_runs'),
+        }
+    }
+    
+    artifact_name = source_info.get('artifact_name', name)
+    
+    deployed_bytecode, bytecode_type = fetch_creation_bytecode_from_hyperscan(address)
+    if not deployed_bytecode:
+        result['error'] = "Could not fetch deployed bytecode from Hyperscan"
+        return result
+    
+    result['details']['bytecode_type'] = bytecode_type
+    use_runtime = bytecode_type == 'runtime'
+    
+    compiled_bytecode = extract_bytecode_from_artifacts(repo_dir, artifact_name, use_runtime=use_runtime)
+    if not compiled_bytecode:
+        # Artifact not in main build — try building the specific file (e.g., nested lib contracts)
+        file_path = source_info.get('file_path')
+        if file_path:
+            if verbose:
+                print(f"    Artifact not in main build, compiling {file_path}...")
+            build_result = subprocess.run(
+                ["forge", "build", file_path, "--force"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=600
+            )
+            if build_result.returncode == 0:
+                compiled_bytecode = extract_bytecode_from_artifacts(repo_dir, artifact_name, use_runtime=use_runtime)
+        if not compiled_bytecode:
+            result['error'] = f"Artifact not found: {artifact_name}"
+            return result
+    
+    match = compare_bytecodes(deployed_bytecode, compiled_bytecode, result)
+    result['verified'] = match
+    
+    return result
+
+
+def extract_bytecode_from_artifacts(repo_dir: Path, artifact_name: str, use_runtime: bool = False) -> Optional[str]:
+    out_dir = repo_dir / "out"
+    if not out_dir.exists():
+        return None
+    
+    search_name = artifact_name.lower()
+    bytecode_key = 'deployedBytecode' if use_runtime else 'bytecode'
+    
+    for artifact_file in out_dir.rglob("*.json"):
+        try:
+            with open(artifact_file) as f:
+                data = json.load(f)
+                contract_name = data.get('contractName', '')
+                if contract_name.lower() == search_name or artifact_file.stem.lower() == search_name:
+                    bytecode = data.get(bytecode_key, {}).get('object')
+                    if bytecode and bytecode != '0x':
+                        return bytecode
+        except:
+            continue
+    
+    return None
+
+
+def compare_bytecodes(deployed: str, compiled: str, result: dict) -> bool:
+    """Compare deployed and compiled bytecodes."""
+    def strip_metadata(bc):
+        if bc.startswith('0x'):
+            bc = bc[2:]
+        marker = "a264697066735822"
+        end_marker = "0033"
+        while marker in bc:
+            idx = bc.find(marker)
+            end_idx = bc.find(end_marker, idx)
+            if end_idx != -1:
+                bc = bc[:idx] + bc[end_idx + len(end_marker):]
+            else:
+                bc = bc[:idx]
+                break
+        return bc
+    
+    deployed_stripped = strip_metadata(deployed)
+    compiled_stripped = strip_metadata(compiled)
+    
+    result['details']['deployed_size'] = len(deployed_stripped) // 2
+    result['details']['compiled_size'] = len(compiled_stripped) // 2
+    
+    if deployed_stripped == compiled_stripped:
+        return True
+    
+    # Check for constructor args
+    if len(deployed_stripped) > len(compiled_stripped):
+        diff = len(deployed_stripped) - len(compiled_stripped)
+        if diff % 64 == 0 and deployed_stripped[:len(compiled_stripped)] == compiled_stripped:
+            result['details']['constructor_args_size'] = diff // 2
+            return True
+    
+    # Handle CREATE2 deployments where init code may have a prefix (salt/factory data)
+    if len(deployed_stripped) > len(compiled_stripped):
+        compiled_start = compiled_stripped[:40]
+        prefix_idx = deployed_stripped.find(compiled_start)
+        if prefix_idx > 0:
+            deployed_trimmed = deployed_stripped[prefix_idx:]
+            if deployed_trimmed == compiled_stripped:
+                result['details']['create2_prefix_size'] = prefix_idx // 2
+                return True
+            # Check for constructor args after CREATE2 prefix
+            if len(deployed_trimmed) > len(compiled_stripped):
+                constructor_args_len = len(deployed_trimmed) - len(compiled_stripped)
+                if constructor_args_len % 64 == 0:
+                    deployed_without_args = deployed_trimmed[:len(compiled_stripped)]
+                    if deployed_without_args == compiled_stripped:
+                        result['details']['create2_prefix_size'] = prefix_idx // 2
+                        result['details']['constructor_args_size'] = constructor_args_len // 2
+                        return True
+    
+    # Log first diff position for debugging
+    for i, (a, b) in enumerate(zip(deployed_stripped, compiled_stripped)):
+        if a != b:
+            result['details']['first_diff_position'] = i
+            result['details']['first_diff_deployed'] = deployed_stripped[max(0, i-20):i+20]
+            result['details']['first_diff_compiled'] = compiled_stripped[max(0, i-20):i+20]
+            break
+    
+    result['error'] = "Bytecode mismatch"
+    return False
+
+
+def print_summary(verified: List[dict], failed: List[dict], skipped: List[str] = None):
     print(f"\n{'='*80}")
     print("VERIFICATION SUMMARY")
     print(f"{'='*80}")
     print(f"✅ Verified: {len(verified)}")
     print(f"❌ Failed: {len(failed)}")
-    print(f"Total: {len(verified) + len(failed)}")
+    if skipped:
+        print(f"⏭️  Skipped: {len(skipped)}")
+    print(f"Total: {len(verified) + len(failed) + (len(skipped) if skipped else 0)}")
     
     if failed:
         print(f"\nFailed contracts:")
         for result in failed:
             print(f"  - {result['name']}: {result['error']}")
+    
+    if skipped:
+        print(f"\nSkipped (no mapping):")
+        for name in skipped:
+            print(f"  - {name}")
 
 
 def save_report(verified: List[dict], failed: List[dict], output_path: str):
@@ -770,16 +967,11 @@ def save_report(verified: List[dict], failed: List[dict], output_path: str):
 
 
 def check_source_mappings(contracts: List[Tuple[str, str]]) -> List[str]:
-    """Check that all contracts have SOURCE_REPOS mappings. Returns list of missing contracts."""
     missing = []
     for contract_info in contracts:
         name = contract_info[0]
-        source_info = SOURCE_REPOS.get(name)
-        if not source_info:
-            for contract_name in SOURCE_REPOS:
-                if contract_name.lower() in name.lower():
-                    source_info = SOURCE_REPOS[contract_name]
-                    break
+        address = contract_info[1] if len(contract_info) > 1 else None
+        source_info = get_source_info_for_contract(name, address)
         if not source_info:
             missing.append(name)
     return missing
@@ -789,32 +981,34 @@ def verify_contract_list(
     contracts: List[Tuple[str, str]], 
     verbose: bool = False,
     show_change_type: bool = False,
-    strict: bool = True
-) -> Tuple[List[dict], List[dict]]:
-    """contracts: (name, address) or (name, address, change_type) tuples when show_change_type=True"""
+    skip_unmapped: bool = False
+) -> Tuple[List[dict], List[dict], List[str]]:
     verified = []
     failed = []
+    skipped = []
     
-    if strict:
-        missing = check_source_mappings(contracts)
-        if missing:
-            print(f"\n{'='*80}")
-            print("❌ FATAL: Missing SOURCE_REPOS mappings")
-            print(f"{'='*80}")
-            print("The following contracts have no source repository mapping defined:")
-            for name in missing:
-                print(f"  - {name}")
-            print("\nTo fix: Add entries to SOURCE_REPOS in scripts/verify-contracts.py")
-            print("Example:")
-            print('  "ContractName": {"repo": "euler-xyz/repo-name", "commit": "abc1234"},')
-            print(f"{'='*80}\n")
-            for name in missing:
-                failed.append({
-                    "name": name,
-                    "verified": False,
-                    "error": "No SOURCE_REPOS mapping - cannot verify without source reference"
-                })
-            return verified, failed
+    missing = check_source_mappings(contracts)
+    
+    if missing and not skip_unmapped:
+        print(f"\n{'='*80}")
+        print("❌ FATAL: Missing contract-mapping.json entries")
+        print(f"{'='*80}")
+        print("The following contracts have no mapping (run generate-contract-mapping.py):")
+        for name in missing:
+            print(f"  - {name}")
+        print("\nUse --skip-unmapped to skip these and verify the rest.")
+        print(f"{'='*80}\n")
+        for name in missing:
+            failed.append({
+                "name": name,
+                "verified": False,
+                "error": "No mapping in contract-mapping.json"
+            })
+        return verified, failed, skipped
+    
+    if missing:
+        print(f"\n⚠️  Skipping {len(missing)} unmapped contracts: {', '.join(missing)}\n")
+        skipped = missing
     
     for contract_info in contracts:
         if show_change_type and len(contract_info) >= 3:
@@ -822,6 +1016,9 @@ def verify_contract_list(
             print(f"\n[{change_type.upper()}] {name}")
         else:
             name, address = contract_info[0], contract_info[1]
+        
+        if name in skipped:
+            continue
         
         verifier = ContractVerifier(address, name=name, verbose=verbose)
         success = verifier.verify()
@@ -831,7 +1028,7 @@ def verify_contract_list(
         else:
             failed.append(verifier.result)
     
-    return verified, failed
+    return verified, failed, skipped
 
 
 def main():
@@ -843,12 +1040,16 @@ def main():
     parser.add_argument('--name', type=str, help='Contract name (used with --address)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     parser.add_argument('--output', '-o', type=str, help='Output JSON report file')
+    parser.add_argument('--skip-unmapped', action='store_true', help='Skip contracts not in contract-mapping.json')
+    parser.add_argument('--batch', action='store_true', help='Batch mode: compile once per repo (faster)')
     
     args = parser.parse_args()
     
     if args.all:
-        verified, failed = verify_all_contracts(verbose=args.verbose)
-        print_summary(verified, failed)
+        verified, failed, skipped = verify_all_contracts(
+            verbose=args.verbose, skip_unmapped=args.skip_unmapped, batch=args.batch
+        )
+        print_summary(verified, failed, skipped)
         
         if args.output:
             save_report(verified, failed, args.output)
@@ -873,9 +1074,11 @@ def main():
         
         addresses = load_address_file(filepath)
         contracts = [(name, address) for name, address in addresses.items()]
-        verified, failed = verify_contract_list(contracts, verbose=args.verbose)
+        verified, failed, skipped = verify_contract_list(
+            contracts, verbose=args.verbose, skip_unmapped=args.skip_unmapped
+        )
         
-        print_summary(verified, failed)
+        print_summary(verified, failed, skipped)
         
         if args.output:
             save_report(verified, failed, args.output)
@@ -899,9 +1102,11 @@ def main():
             (c['name'], c['address'], c.get('change_type', 'unknown')) 
             for c in changed_contracts
         ]
-        verified, failed = verify_contract_list(contracts, verbose=args.verbose, show_change_type=True)
+        verified, failed, skipped = verify_contract_list(
+            contracts, verbose=args.verbose, show_change_type=True, skip_unmapped=args.skip_unmapped
+        )
         
-        print_summary(verified, failed)
+        print_summary(verified, failed, skipped)
         
         if args.output:
             save_report(verified, failed, args.output)
