@@ -1,0 +1,123 @@
+name: Verify Contract Addresses
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'addresses/**/*.json'
+
+jobs:
+  verify-contracts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Detect changed addresses
+        id: detect
+        run: |
+          set +o pipefail
+          git diff origin/${{ github.base_ref }}..${{ github.sha }} -- 'addresses/**/*.json' | \
+            grep '^+' | grep '"0x' > /tmp/raw_changes.txt || true
+          set -o pipefail
+
+          python3 -c "
+          import sys, re, json
+          addresses = []
+          try:
+              with open('/tmp/raw_changes.txt') as f:
+                  for line in f:
+                      line = line[1:].strip().rstrip(',')
+                      m = re.match(r'\"([^\"]+)\"\s*:\s*\"(0x[a-fA-F0-9]{40})\"', line)
+                      if m:
+                          name, addr = m.groups()
+                          if addr.lower() != '0x' + '0' * 40:
+                              addresses.append({'name': name, 'address': addr.lower()})
+          except FileNotFoundError:
+              pass
+          if addresses:
+              with open('changed-addresses.json', 'w') as f:
+                  json.dump(addresses, f, indent=2)
+              print(f'Found {len(addresses)} changed address(es)', file=sys.stderr)
+          else:
+              print('No contract addresses changed', file=sys.stderr)
+          "
+
+          echo "has_changes=$(test -f changed-addresses.json && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify contracts
+        if: steps.detect.outputs.has_changes == 'true'
+        run: |
+          python3 scripts/verify-contracts.py \
+            --changed-file changed-addresses.json \
+            --output verification-report.json \
+            --skip-unmapped \
+            --verbose
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report
+          path: verification-report.json
+          if-no-files-found: ignore
+
+      - name: Comment on PR
+        if: always() && steps.detect.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            if (!fs.existsSync('verification-report.json')) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '**Contract Verification**: Unable to read report. Check workflow logs.'
+              });
+              return;
+            }
+
+            const report = JSON.parse(fs.readFileSync('verification-report.json', 'utf8'));
+            const ok = report.summary.failed === 0;
+            let body = ok
+              ? '**All Contract Addresses Verified**\n\n'
+              : '**Contract Verification Failed**\n\n';
+
+            body += `| Metric | Count |\n|---|---|\n`;
+            body += `| Verified | ${report.summary.verified} |\n`;
+            body += `| Failed | ${report.summary.failed} |\n`;
+            body += `| Total | ${report.summary.total} |\n\n`;
+
+            if (report.failed && report.failed.length > 0) {
+              body += '**Failed:**\n';
+              for (const c of report.failed) {
+                body += `- **${c.name}** (\`${c.address}\`): ${c.error}\n`;
+              }
+            }
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

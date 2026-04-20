@@ -1,0 +1,6 @@
+# Code Owners
+# This file defines who must approve PRs for different parts of the repository
+# For more information: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# All files require approval from code owners
+* @androolloyd @sb777
